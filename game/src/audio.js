@@ -1,246 +1,388 @@
-// Procedural WebAudio: no audio files, no network. Radio is three invented
-// stations from config (tiny oscillator step-sequencers), plus engine hum,
-// horn, gunshots, explosions, pickups and a mission sting. Everything is
-// created lazily on first use (after the player presses Enter) and every
-// method is a no-op — never a throw — when AudioContext is unavailable
-// (headless Chrome has no audio). Mute is M, radio station is C (held-edge);
-// input.js never maps ACTION_RADIO, so C is the documented radio key.
+// audio.js — procedural radio and sound effects. Everything is
+// synthesised live with WebAudio: three invented stations with their own
+// melodies, tempos, and instruments, plus one-shot effects for shots,
+// explosions, horns, pickups, the phone, and mission stings. There are no
+// audio files and no network requests. The AudioContext is created lazily
+// and resumed on the first user gesture; every call is guarded, so a
+// suspended or missing context can never crash the game.
 
-import { RADIO } from './config.js';
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
 
-// Per-station step patterns (8th notes). root is in Hz (RADIO[].root).
-const PATTERNS = [
-  // RADIO SOL — latin pop: warm pad chords + bass.
-  { wave: 'triangle', arp: [1, 1.5, 2, 1.5], bass: [1, 1, 0.75, 1.33], vol: 0.10, pad: true },
-  // OLA FM — chillwave: slow sine arpeggio.
-  { wave: 'sine', arp: [2, 2.52, 3, 2.52, 4, 3, 2.52, 2], bass: [1, 0.5, 0.75, 0.5], vol: 0.09, pad: false },
-  // FARO ROCK — fast square arpeggio + driving bass.
-  { wave: 'square', arp: [1, 1.5, 2, 3, 2, 1.5], bass: [1, 1, 1.5, 1], vol: 0.06, pad: false },
+// Deterministic PRNG for small musical variations (fills, hat accents).
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function next() {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function midiToFreq(midi) {
+  return 440 * Math.pow(2, (midi - 69) / 12);
+}
+
+// 0 means a rest. Sixteen steps per bar, four bars per loop.
+export const STATIONS = [
+  {
+    id: 'faro-rock',
+    name: 'Faro Rock 101',
+    bpm: 132,
+    leadWave: 'square',
+    bassWave: 'sawtooth',
+    leadGain: 0.05,
+    bassGain: 0.07,
+    // A minor pentatonic, driving and bright.
+    lead: [
+      69, 0, 72, 0, 74, 0, 72, 0, 76, 0, 74, 72, 0, 69, 0, 0,
+      69, 0, 72, 0, 74, 76, 0, 74, 72, 0, 69, 0, 67, 0, 0, 0,
+      69, 0, 72, 0, 74, 0, 72, 0, 76, 79, 76, 74, 72, 74, 0, 0,
+      76, 0, 74, 72, 74, 0, 72, 0, 69, 0, 67, 0, 64, 0, 0, 0,
+    ],
+    bass: [
+      45, 0, 45, 0, 45, 0, 48, 0, 45, 0, 45, 0, 43, 0, 43, 0,
+      45, 0, 45, 0, 45, 0, 48, 0, 50, 0, 48, 0, 45, 0, 43, 0,
+      45, 0, 45, 0, 45, 0, 48, 0, 45, 0, 45, 0, 43, 0, 43, 0,
+      41, 0, 41, 0, 43, 0, 45, 0, 48, 0, 50, 0, 52, 0, 52, 0,
+    ],
+  },
+  {
+    id: 'maravilla-nights',
+    name: 'Maravilla Nights',
+    bpm: 96,
+    leadWave: 'triangle',
+    bassWave: 'sine',
+    leadGain: 0.06,
+    bassGain: 0.08,
+    // D minor seven, smooth and late-night.
+    lead: [
+      62, 0, 0, 65, 0, 0, 69, 0, 0, 0, 67, 0, 65, 0, 0, 0,
+      62, 0, 0, 65, 0, 0, 69, 0, 72, 0, 0, 69, 0, 0, 67, 0,
+      65, 0, 0, 69, 0, 0, 72, 0, 0, 0, 74, 0, 72, 0, 69, 0,
+      67, 0, 0, 65, 0, 0, 62, 0, 0, 0, 60, 0, 0, 0, 0, 0,
+    ],
+    bass: [
+      38, 0, 0, 0, 0, 0, 38, 0, 41, 0, 0, 0, 0, 0, 41, 0,
+      38, 0, 0, 0, 0, 0, 38, 0, 41, 0, 0, 0, 0, 0, 45, 0,
+      38, 0, 0, 0, 0, 0, 38, 0, 43, 0, 0, 0, 0, 0, 43, 0,
+      41, 0, 0, 0, 0, 0, 41, 0, 38, 0, 0, 0, 36, 0, 36, 0,
+    ],
+  },
+  {
+    id: 'sol-fm',
+    name: 'Sol FM',
+    bpm: 112,
+    leadWave: 'triangle',
+    bassWave: 'triangle',
+    leadGain: 0.06,
+    bassGain: 0.07,
+    // C major, sunny and bouncy.
+    lead: [
+      72, 0, 76, 0, 79, 0, 76, 0, 72, 0, 74, 0, 76, 0, 0, 0,
+      77, 0, 76, 0, 74, 0, 76, 0, 79, 0, 76, 0, 74, 72, 0, 0,
+      72, 0, 76, 0, 79, 0, 81, 0, 79, 76, 0, 74, 0, 76, 0, 0,
+      79, 0, 76, 0, 74, 0, 72, 0, 74, 0, 76, 0, 79, 0, 0, 0,
+    ],
+    bass: [
+      48, 0, 0, 48, 0, 0, 55, 0, 48, 0, 0, 48, 0, 0, 53, 0,
+      48, 0, 0, 48, 0, 0, 55, 0, 50, 0, 0, 50, 0, 0, 52, 0,
+      48, 0, 0, 48, 0, 0, 55, 0, 48, 0, 0, 48, 0, 0, 53, 0,
+      50, 0, 0, 50, 0, 0, 52, 0, 55, 0, 0, 55, 0, 0, 55, 0,
+    ],
+  },
 ];
 
-export function createAudio(ctx) {
-  const state = ctx ? ctx.state : null;
-  const input = ctx ? ctx.input : null;
-  let ac = null;
-  let master = null;
-  let radioGain = null;
-  let engineOsc = null;
-  let engineGain = null;
-  let enabled = false;
-  let tried = false;
-  let step = 0;
-  let nextNote = 0;
-  let prevM = false;
-  let prevC = false;
+export const STATION_NAMES = STATIONS.map((s) => s.name);
 
-  function ensure() {
-    if (enabled) return true;
-    if (tried) return false;
-    tried = true;
+export function createAudio(state, bus) {
+  const rng = mulberry32(0x41554449); // 'AUDI'
+  let ctx = null;
+  let master = null;
+  let musicGain = null;
+  let sfxGain = null;
+  let noiseBuffer = null;
+  let schedulerTimer = null;
+  let step = 0;
+  let nextStepTime = 0;
+  let sirenTimer = 0;
+  let sirenHigh = false;
+
+  function radioState() {
+    if (!state.radio) state.radio = { station: 0, muted: false };
+    if (typeof state.radio.station !== 'number') state.radio.station = 0;
+    if (typeof state.radio.muted !== 'boolean') state.radio.muted = false;
+    return state.radio;
+  }
+
+  function isMuted() {
+    return radioState().muted || (state.flags ? state.flags.muted === true : false);
+  }
+
+  function currentStation() {
+    const r = radioState();
+    return STATIONS[clamp(r.station, 0, STATIONS.length - 1)];
+  }
+
+  function ensureContext() {
+    if (ctx) return ctx;
     try {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) return false;
-      ac = new AC();
-      master = ac.createGain();
-      master.gain.value = state && state.muted ? 0 : 0.5;
-      master.connect(ac.destination);
-      radioGain = ac.createGain();
-      radioGain.gain.value = 0.6;
-      radioGain.connect(master);
-      engineOsc = ac.createOscillator();
-      engineOsc.type = 'sawtooth';
-      engineOsc.frequency.value = 55;
-      engineGain = ac.createGain();
-      engineGain.gain.value = 0;
-      engineOsc.connect(engineGain);
-      engineGain.connect(master);
-      engineOsc.start();
-      enabled = true;
-      return true;
-    } catch (e) {
-      return false;
+      const AC =
+        typeof window !== 'undefined'
+          ? window.AudioContext || window.webkitAudioContext
+          : null;
+      if (!AC) return null;
+      ctx = new AC();
+      master = ctx.createGain();
+      master.gain.value = isMuted() ? 0 : 0.9;
+      master.connect(ctx.destination);
+      musicGain = ctx.createGain();
+      musicGain.gain.value = 0.5;
+      musicGain.connect(master);
+      sfxGain = ctx.createGain();
+      sfxGain.gain.value = 0.9;
+      sfxGain.connect(master);
+      const len = ctx.sampleRate;
+      noiseBuffer = ctx.createBuffer(1, len, ctx.sampleRate);
+      const data = noiseBuffer.getChannelData(0);
+      for (let i = 0; i < len; i += 1) data[i] = rng() * 2 - 1;
+      startScheduler();
+    } catch (err) {
+      ctx = null;
+    }
+    return ctx;
+  }
+
+  // Call from any user gesture (click, keydown). Safe to call often.
+  function resume() {
+    try {
+      const c = ensureContext();
+      if (c && c.state === 'suspended') {
+        const p = c.resume();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+      }
+    } catch (err) {
+      // Audio must never break the game.
     }
   }
 
-  function resume() {
+  function scheduleStep(stepIndex, time) {
+    if (!ctx) return;
     try {
-      if (ac && ac.state === 'suspended') ac.resume().catch(() => {});
-    } catch (e) { /* no-op */ }
+      const station = currentStation();
+      const total = station.lead.length;
+      const i = stepIndex % total;
+      const leadNote = station.lead[i];
+      const bassNote = station.bass[i];
+      const stepDur = 60 / station.bpm / 4;
+      if (leadNote > 0) {
+        playTone(midiToFreq(leadNote), time, stepDur * 0.9, station.leadWave, station.leadGain, musicGain);
+      }
+      if (bassNote > 0) {
+        playTone(midiToFreq(bassNote), time, stepDur * 0.95, station.bassWave, station.bassGain, musicGain);
+      }
+      // Hat tick on the off-beats, slightly varied so it breathes.
+      if (i % 4 === 2 && rng() < 0.8) {
+        playNoise(time, 0.03, 0.015, 6000);
+      }
+    } catch (err) {
+      // A missed note is not worth an exception.
+    }
   }
 
-  function tone(freq, dur, type = 'sine', vol = 0.2, when = 0, slideTo = null) {
-    if (!enabled) return;
-    try {
-      const t0 = ac.currentTime + when;
-      const o = ac.createOscillator();
-      const g = ac.createGain();
-      o.type = type;
-      o.frequency.setValueAtTime(Math.max(20, freq), t0);
-      if (slideTo) o.frequency.exponentialRampToValueAtTime(Math.max(20, slideTo), t0 + dur);
-      g.gain.setValueAtTime(0, t0);
-      g.gain.linearRampToValueAtTime(vol, t0 + 0.01);
-      g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
-      o.connect(g);
-      g.connect(master);
-      o.start(t0);
-      o.stop(t0 + dur + 0.05);
-    } catch (e) { /* no-op */ }
+  function startScheduler() {
+    if (schedulerTimer !== null || !ctx) return;
+    nextStepTime = ctx.currentTime + 0.05;
+    step = 0;
+    schedulerTimer = setInterval(() => {
+      try {
+        if (!ctx || ctx.state !== 'running') return;
+        const station = currentStation();
+        const stepDur = 60 / station.bpm / 4;
+        while (nextStepTime < ctx.currentTime + 0.18) {
+          scheduleStep(step, nextStepTime);
+          nextStepTime += stepDur;
+          step += 1;
+        }
+      } catch (err) {
+        // Scheduler must never throw.
+      }
+    }, 60);
   }
 
-  function noiseBurst(dur, vol = 0.3, filterFreq = 1200) {
-    if (!enabled) return;
+  function playTone(freq, time, dur, wave, gainValue, dest) {
+    if (!ctx) return;
     try {
-      const len = Math.floor(ac.sampleRate * dur);
-      const buf = ac.createBuffer(1, len, ac.sampleRate);
-      const data = buf.getChannelData(0);
-      for (let i = 0; i < len; i += 1) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
-      const src = ac.createBufferSource();
-      src.buffer = buf;
-      const filter = ac.createBiquadFilter();
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = wave;
+      osc.frequency.setValueAtTime(freq, time);
+      g.gain.setValueAtTime(0, time);
+      g.gain.linearRampToValueAtTime(gainValue, time + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, time + dur);
+      osc.connect(g);
+      g.connect(dest || sfxGain);
+      osc.start(time);
+      osc.stop(time + dur + 0.05);
+    } catch (err) {
+      // Ignore audio errors.
+    }
+  }
+
+  function playNoise(time, dur, gainValue, filterFreq) {
+    if (!ctx || !noiseBuffer) return;
+    try {
+      const src = ctx.createBufferSource();
+      src.buffer = noiseBuffer;
+      src.loop = true;
+      const filter = ctx.createBiquadFilter();
       filter.type = 'lowpass';
-      filter.frequency.value = filterFreq;
-      const g = ac.createGain();
-      g.gain.value = vol;
+      filter.frequency.setValueAtTime(filterFreq || 1200, time);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(gainValue, time);
+      g.gain.exponentialRampToValueAtTime(0.0001, time + dur);
       src.connect(filter);
       filter.connect(g);
-      g.connect(master);
-      src.start();
-    } catch (e) { /* no-op */ }
+      g.connect(sfxGain);
+      src.start(time);
+      src.stop(time + dur + 0.05);
+    } catch (err) {
+      // Ignore audio errors.
+    }
   }
 
-  function scheduleRadioStep(station, when) {
-    if (!enabled) return;
+  function playSfx(name, opts) {
+    if (isMuted()) return;
     try {
-      const st = RADIO[station] || RADIO[0];
-      const pat = PATTERNS[station] || PATTERNS[0];
-      const root = st.root || 55;
-      const arpNote = pat.arp[step % pat.arp.length] * root * 2;
-      const bassNote = pat.bass[step % pat.bass.length] * root;
-      const t0 = when;
-      const mk = (freq, type, vol, dur) => {
-        const o = ac.createOscillator();
-        const g = ac.createGain();
-        o.type = type;
-        o.frequency.value = freq;
-        g.gain.setValueAtTime(0, t0);
-        g.gain.linearRampToValueAtTime(vol, t0 + 0.02);
-        g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
-        o.connect(g);
-        g.connect(radioGain);
-        o.start(t0);
-        o.stop(t0 + dur + 0.05);
-      };
-      mk(arpNote, pat.wave, pat.vol, 0.28);
-      if (step % 2 === 0) mk(bassNote, 'sine', 0.14, 0.4);
-      if (pat.pad && step % 4 === 0) {
-        mk(root * 2, 'triangle', 0.05, 0.9);
-        mk(root * 3, 'triangle', 0.03, 0.9);
+      const c = ensureContext();
+      if (!c || c.state !== 'running') return;
+      const t = c.currentTime + 0.01;
+      if (name === 'shot') {
+        playNoise(t, 0.09, 0.25, 3000);
+        playTone(170, t, 0.08, 'square', 0.12, sfxGain);
+      } else if (name === 'explosion') {
+        playNoise(t, 0.8, 0.5, 900);
+        playTone(120, t, 0.7, 'sine', 0.35, sfxGain);
+        playTone(55, t + 0.05, 0.6, 'sine', 0.3, sfxGain);
+      } else if (name === 'horn') {
+        playTone(370, t, 0.35, 'sawtooth', 0.1, sfxGain);
+        playTone(466, t, 0.35, 'sawtooth', 0.1, sfxGain);
+      } else if (name === 'pickup') {
+        playTone(660, t, 0.09, 'sine', 0.15, sfxGain);
+        playTone(990, t + 0.09, 0.14, 'sine', 0.15, sfxGain);
+      } else if (name === 'phone-ring') {
+        playTone(1250, t, 0.12, 'sine', 0.12, sfxGain);
+        playTone(1500, t + 0.16, 0.12, 'sine', 0.12, sfxGain);
+      } else if (name === 'mission-sting') {
+        const notes = [72, 76, 79, 84];
+        notes.forEach((n, i) => playTone(midiToFreq(n), t + i * 0.11, 0.22, 'triangle', 0.14, sfxGain));
+      } else if (name === 'reload') {
+        playTone(1200, t, 0.04, 'square', 0.08, sfxGain);
+        playTone(900, t + 0.12, 0.04, 'square', 0.08, sfxGain);
+      } else if (name === 'busted') {
+        playTone(392, t, 0.25, 'sawtooth', 0.12, sfxGain);
+        playTone(311, t + 0.25, 0.4, 'sawtooth', 0.12, sfxGain);
+      } else if (name === 'siren-blip') {
+        playTone(sirenHigh ? 950 : 700, t, 0.35, 'sine', 0.05, sfxGain);
+        sirenHigh = !sirenHigh;
       }
-    } catch (e) { /* no-op */ }
+    } catch (err) {
+      // Sound effects must never crash the game.
+    }
   }
 
-  function radioNext() {
-    if (!state) return '';
-    state.radio.station = (state.radio.station + 1) % RADIO.length;
-    step = 0;
-    return (RADIO[state.radio.station] || {}).name || '';
+  function setStation(index) {
+    const r = radioState();
+    r.station = clamp(index, 0, STATIONS.length - 1);
+    if (bus) bus.emit('radio-changed', { station: r.station, name: STATIONS[r.station].name });
+    return STATIONS[r.station].name;
   }
 
-  function setMuted(m) {
-    if (state) state.muted = !!m;
+  function nextStation() {
+    const r = radioState();
+    return setStation((r.station + 1) % STATIONS.length);
+  }
+
+  function setMuted(muted) {
+    const r = radioState();
+    r.muted = !!muted;
+    if (state.flags) state.flags.muted = r.muted;
     try {
-      if (master) master.gain.value = m ? 0 : 0.5;
-    } catch (e) { /* no-op */ }
+      if (master && ctx) master.gain.setValueAtTime(r.muted ? 0 : 0.9, ctx.currentTime);
+    } catch (err) {
+      // Ignore.
+    }
+    if (bus) bus.emit('mute-changed', { muted: r.muted });
+    return r.muted;
+  }
+
+  function toggleMute() {
+    return setMuted(!isMuted());
   }
 
   function update(dt) {
-    // M mute / C radio-next, held-edge so they never fight takeActions().
-    if (input) {
-      const mHeld = input.held('KeyM');
-      if (mHeld && !prevM) setMuted(!(state && state.muted));
-      prevM = mHeld;
-      const cHeld = input.held('KeyC');
-      if (cHeld && !prevC) radioNext();
-      prevC = cHeld;
-    }
-    if (!state || state.screen !== 'play') return;
-    if (!state.radio.on || state.muted) return;
-    if (!ensure()) return;
-    resume();
-    try {
-      const st = RADIO[state.radio.station] || RADIO[0];
-      const beat = 60 / (st.bpm || 100) / 2; // 8th notes
-      if (nextNote < ac.currentTime) nextNote = ac.currentTime + 0.05;
-      while (nextNote < ac.currentTime + 0.15) {
-        scheduleRadioStep(state.radio.station, nextNote);
-        step += 1;
-        nextNote += beat;
+    if (!dt || dt <= 0) return;
+    // A soft two-tone siren while the heat is on, driven by game time.
+    const level = state.wanted ? state.wanted.level || 0 : 0;
+    if (level > 0 && !isMuted()) {
+      sirenTimer -= dt;
+      if (sirenTimer <= 0) {
+        sirenTimer = 0.9;
+        playSfx('siren-blip');
       }
-    } catch (e) { /* no-op */ }
+    } else {
+      sirenTimer = 0;
+    }
   }
 
-  function horn() {
-    if (!ensure()) return;
-    resume();
-    tone(370, 0.35, 'square', 0.12);
-    tone(466, 0.35, 'square', 0.12);
+  function handleKey(code) {
+    if (code === 'KeyC') {
+      const name = nextStation();
+      if (bus) bus.emit('message', { text: 'Radio: ' + name });
+      return true;
+    }
+    if (code === 'KeyM') {
+      const muted = toggleMute();
+      if (bus) bus.emit('message', { text: muted ? 'Radio muted.' : 'Radio on: ' + currentStation().name });
+      return true;
+    }
+    return false;
   }
 
-  function shoot(weaponId) {
-    if (!ensure()) return;
-    resume();
-    try {
-      if (weaponId === 'shotgun') { noiseBurst(0.22, 0.5, 900); tone(180, 0.15, 'square', 0.2, 0, 60); }
-      else if (weaponId === 'smg') { tone(900, 0.06, 'square', 0.16, 0, 220); noiseBurst(0.05, 0.18, 2400); }
-      else if (weaponId === 'rifle') { noiseBurst(0.18, 0.45, 1600); tone(700, 0.12, 'square', 0.2, 0, 140); }
-      else { tone(800, 0.09, 'square', 0.18, 0, 180); noiseBurst(0.06, 0.2, 2000); }
-    } catch (e) { /* no-op */ }
+  if (bus) {
+    bus.on('shot-fired', () => playSfx('shot'));
+    bus.on('explosion', () => playSfx('explosion'));
+    bus.on('pickup', () => playSfx('pickup'));
+    bus.on('phone-used', () => playSfx('phone-ring'));
+    bus.on('phone-opened', () => playSfx('phone-ring'));
+    bus.on('mission-complete', () => playSfx('mission-sting'));
+    bus.on('horn', () => playSfx('horn'));
+    bus.on('honk', () => playSfx('horn'));
+    bus.on('reload-started', () => playSfx('reload'));
+    bus.on('busted', () => playSfx('busted'));
+    bus.on('user-gesture', () => resume());
   }
 
-  function explosion() {
-    if (!ensure()) return;
-    resume();
-    noiseBurst(0.8, 0.6, 700);
-    tone(120, 0.7, 'sine', 0.4, 0, 30);
-  }
-
-  function pickup() {
-    if (!ensure()) return;
-    resume();
-    tone(660, 0.09, 'sine', 0.2);
-    tone(880, 0.14, 'sine', 0.2, 0.09);
-  }
-
-  function missionSting() {
-    if (!ensure()) return;
-    resume();
-    [523, 659, 784, 1046].forEach((f, i) => tone(f, 0.22, 'triangle', 0.18, i * 0.09));
-  }
-
-  // Generic one-shot dispatcher for systems that call audio.play(name):
-  // 'shot' (generic gunshot), 'click' (UI blip), 'swing' (melee whoosh).
-  function play(name) {
-    if (!ensure()) return;
-    resume();
-    try {
-      if (name === 'shot') shoot('pistol');
-      else if (name === 'swing') { noiseBurst(0.12, 0.15, 3000); tone(300, 0.12, 'sine', 0.1, 0, 90); }
-      else tone(660, 0.06, 'sine', 0.12); // 'click' and anything else
-    } catch (e) { /* no-op */ }
-  }
-
-  function engine(on, speed01) {
-    if (!enabled) return;
-    try {
-      if (!engineOsc || !engineGain) return;
-      const target = on ? 0.035 + Math.min(1, speed01 || 0) * 0.045 : 0;
-      engineGain.gain.setTargetAtTime(target, ac.currentTime, 0.08);
-      engineOsc.frequency.setTargetAtTime(55 + Math.min(1, speed01 || 0) * 165, ac.currentTime, 0.08);
-    } catch (e) { /* no-op */ }
-  }
-
+  // Resume on the first gesture even without the bus: main.js can call
+  // resume() from its own keydown / pointerdown handlers.
   return {
-    update, horn, shoot, explosion, pickup, missionSting, radioNext, setMuted, engine, play,
-    get enabled() { return enabled; },
+    update,
+    resume,
+    ensureContext,
+    setStation,
+    nextStation,
+    setMuted,
+    toggleMute,
+    isMuted,
+    currentStation,
+    stationName() {
+      return currentStation().name;
+    },
+    playSfx,
+    handleKey,
+    stations: STATIONS,
   };
 }

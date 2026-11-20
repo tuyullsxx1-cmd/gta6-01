@@ -1,261 +1,305 @@
-// Maravilla — the pause menu: MAP / MISSIONS / STATS / CREW / SAVE tabs.
-// main.js shows/hides it when the screen flips to/from 'paused' (systems
-// do not update while paused, so this module owns its own DOM + listeners
-// and refreshes on show and on every tab click). Communicates only via
-// state.* and the save/phone/missions systems on ctx.
+// pause.js — the 5-tab pause menu for MARAVILLA: MAP / MISSIONS / STATS /
+// CREW / SAVE. Opened with P or Esc. Written from the prose design spec.
 
-import { CITY, DISTRICTS, MISSION_NAMES, ACTS, MISSION_PARS, CREW } from './config.js';
-import { portraitUrl } from './portraits.js';
+import { saveSlot, loadSlot, listSlots, loadLeaderboard } from './save.js';
+import { MISSIONS } from './missions.js';
 
 const TABS = ['MAP', 'MISSIONS', 'STATS', 'CREW', 'SAVE'];
 
-export function createPause(ctx) {
-  const { state } = ctx;
-  let el = null;
-  let activeTab = 'MAP';
-  let shown = false;
+const CREW_INFO = [
+  { id: 'luz', name: 'Mama Luz', role: 'Fixer — points at the next job', key: 'B' },
+  { id: 'celia', name: 'Celia Reyes', role: 'Driver / hacker — scrubs 2 stars of heat, $150', key: 'Z' },
+  { id: 'tito', name: 'Tito Fuentes', role: 'Mechanic — repairs the ride, $100', key: 'X' },
+  { id: 'marlon', name: 'Big Marlon', role: 'Muscle — clears nearby cops, $200', key: 'V' },
+];
 
-  function msg(text, kind = 'info') {
-    if (ctx.hud && ctx.hud.message) { ctx.hud.message(text, kind); return; }
-    if (state.messages) state.messages.push({ text, at: state.time, kind });
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function fmtMoney(n) {
+  return `$${Number(n || 0).toLocaleString('en-US')}`;
+}
+
+function fmtTime(seconds) {
+  const s = Math.floor(seconds || 0);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+}
+
+function fmtClock(minutes) {
+  const m = Math.floor(minutes || 0) % 1440;
+  const hh = Math.floor(m / 60);
+  const mm = m % 60;
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+}
+
+export function createPause(state, bus) {
+  const emit = (name, data) => {
+    if (bus && typeof bus.emit === 'function') bus.emit(name, data);
+  };
+
+  let open = false;
+  let tab = 'MAP';
+  let menuEl = null;
+  let bodyEl = null;
+
+  function isOpen() {
+    return open;
   }
 
-  function build() {
-    if (el || typeof document === 'undefined') return;
-    el = document.createElement('div');
-    el.id = 'pause-menu';
-    el.style.display = 'none';
-    el.innerHTML = '<div class="pause-title">PAUSED — MARAVILLA</div>'
-      + '<div class="pause-tabs"></div>'
-      + '<div class="pause-body"></div>'
-      + '<div class="pause-hint">Click a tab or press 1–5 · P resumes</div>';
-    const tabsEl = el.querySelector('.pause-tabs');
-    TABS.forEach((t, i) => {
-      const b = document.createElement('button');
-      b.className = 'pause-tab';
-      b.textContent = `${i + 1} · ${t}`;
-      b.addEventListener('click', () => { activeTab = t; refresh(); });
-      tabsEl.appendChild(b);
-    });
-    document.body.appendChild(el);
-    if (typeof window !== 'undefined') {
-      window.addEventListener('keydown', (event) => {
-        if (!shown || event.repeat) return;
-        const n = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5'].indexOf(event.code);
-        if (n >= 0) { activeTab = TABS[n]; refresh(); }
-      });
+  function findEls() {
+    if (!menuEl && typeof document !== 'undefined') {
+      menuEl = document.getElementById('pause-menu');
+      bodyEl = menuEl ? menuEl.querySelector('.pause-body') : null;
     }
+    return !!menuEl;
   }
 
-  function fmtTime(sec) {
-    const m = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60);
-    return `${m}:${String(s).padStart(2, '0')}`;
+  function setPaused(value) {
+    if (!state.flags) state.flags = {};
+    state.flags.paused = value;
+    emit(value ? 'game:paused' : 'game:resumed', {});
   }
 
-  function drawMap(canvas) {
-    const g = canvas.getContext('2d');
-    const S = canvas.width;
-    const scale = S / 620;
-    const toX = (x) => S / 2 + x * scale;
-    const toY = (z) => S / 2 + z * scale;
-    g.clearRect(0, 0, S, S);
-    g.fillStyle = '#0d2f45';
-    g.fillRect(0, 0, S, S);
-    g.fillStyle = '#123a5c';
-    g.fillRect(toX(300), 0, S - toX(300), S);
-    g.fillStyle = '#c9b078';
-    g.fillRect(toX(264), 0, toX(300) - toX(264), S);
-    g.fillStyle = '#232a33';
-    g.fillRect(toX(-300), toY(-300), 600 * scale, 600 * scale);
-    g.strokeStyle = '#4a545e';
-    g.lineWidth = Math.max(2, CITY.roadWidth * scale);
-    for (const c of CITY.roads) {
-      g.beginPath(); g.moveTo(toX(c), 0); g.lineTo(toX(c), S); g.stroke();
-      g.beginPath(); g.moveTo(0, toY(c)); g.lineTo(S, toY(c)); g.stroke();
-    }
-    g.fillStyle = '#cfd6de';
-    g.font = `bold ${Math.max(10, S / 42)}px system-ui, sans-serif`;
-    g.textAlign = 'center';
-    for (const d of DISTRICTS) {
-      const cx = (d.minX + d.maxX) / 2;
-      const cz = (d.minZ + d.maxZ) / 2;
-      g.fillText(d.name.toUpperCase(), toX(cx), toY(cz));
-    }
-    // Places.
-    g.fillStyle = '#ffd98a';
-    g.font = '11px system-ui, sans-serif';
-    for (const [key, pl] of Object.entries(CITY.places)) {
-      g.beginPath(); g.arc(toX(pl.x), toY(pl.z), 3, 0, Math.PI * 2); g.fill();
-      g.fillText(pl.name, toX(pl.x), toY(pl.z) - 6);
-    }
-    // Route to the mission marker.
-    const marker = state.mission && state.mission.marker;
-    if (marker) {
-      g.strokeStyle = '#ffd94d';
-      g.lineWidth = 2;
-      g.setLineDash([6, 5]);
-      g.beginPath();
-      g.moveTo(toX(state.player.x), toY(state.player.z));
-      g.lineTo(toX(marker.x), toY(marker.z));
-      g.stroke();
-      g.setLineDash([]);
-      g.fillStyle = '#ffd94d';
-      g.beginPath();
-      g.moveTo(toX(marker.x), toY(marker.z) - 8);
-      g.lineTo(toX(marker.x) + 7, toY(marker.z));
-      g.lineTo(toX(marker.x), toY(marker.z) + 8);
-      g.lineTo(toX(marker.x) - 7, toY(marker.z));
-      g.closePath(); g.fill();
-    }
-    // Player.
-    g.fillStyle = '#7be495';
-    g.beginPath(); g.arc(toX(state.player.x), toY(state.player.z), 5, 0, Math.PI * 2); g.fill();
-    g.fillStyle = '#ffd94d';
-    g.font = 'bold 12px system-ui, sans-serif';
-    g.fillText('N', S / 2, 14);
+  function openMenu(initialTab) {
+    findEls();
+    open = true;
+    if (initialTab && TABS.includes(initialTab)) tab = initialTab;
+    setPaused(true);
+    render();
+    if (menuEl) menuEl.style.display = 'block';
+    emit('pause:opened', { tab });
   }
 
-  function missionsHtml() {
-    let html = '';
-    for (const act of ACTS) {
-      const done = act.missions.filter((i) => state.missionsDone.includes(i)).length;
-      html += `<div class="pause-act"><b>${act.name}</b> — ${done}/${act.missions.length} done`
-        + `<div class="pause-act-blurb">${act.blurb}</div>`;
-      for (const i of act.missions) {
-        const locked = i > state.nextMission;
-        const isCurrent = i === state.nextMission && !state.missionsDone.includes(i);
-        const rating = state.ratings[i];
-        const status = state.missionsDone.includes(i)
-          ? `DONE · rating ${rating || '—'}`
-          : (isCurrent ? 'AVAILABLE — go to the yellow marker' : 'LOCKED — finish the earlier jobs first');
-        html += `<div class="pause-mission ${locked ? 'locked' : ''}">`
-          + `<b>${i + 1}. ${MISSION_NAMES[i]}</b> — ${status}`
-          + `<span class="pause-sub">$${[400, 900, 700, 800, 1000, 1100, 1400, 1500, 1800, 5000][i]} · par ${fmtTime(MISSION_PARS[i])}</span></div>`;
-      }
-      html += '</div>';
-    }
-    return html;
+  function closeMenu() {
+    open = false;
+    setPaused(false);
+    if (menuEl) menuEl.style.display = 'none';
+    emit('pause:closed', {});
   }
 
-  function statsHtml() {
-    const s = state.stats;
-    const acc = s.shotsFired > 0 ? Math.round((s.hits / s.shotsFired) * 100) : 0;
+  function toggle() {
+    if (open) closeMenu();
+    else openMenu();
+  }
+
+  function setTab(next) {
+    if (!TABS.includes(next)) return;
+    tab = next;
+    render();
+    emit('pause:tab', { tab });
+  }
+
+  // --- Tab renderers ------------------------------------------------------
+  function renderMap() {
+    const p = state.player || {};
+    const districts = (state.districts && state.districts.standing) || {};
+    const rows = Object.keys(districts)
+      .map((d) => `<tr><td>${esc(d)}</td><td>${districts[d]}</td></tr>`)
+      .join('');
+    const obj = (state.missions && state.missions.objective) || '—';
+    return `
+      <h3>MAP — MARAVILLA</h3>
+      <p>Position: ${Math.round(p.x || 0)}, ${Math.round(p.z || 0)} &nbsp;|&nbsp; Day ${(state.clock && state.clock.day) || 1}, ${fmtClock(state.clock && state.clock.minutes)}</p>
+      <p>Current objective: <strong>${esc(obj)}</strong></p>
+      <p class="muted">Open the minimap on the HUD for the live route line. Districts and standing:</p>
+      <table class="pause-table"><tr><th>District</th><th>Standing</th></tr>${rows}</table>`;
+  }
+
+  function renderMissions() {
+    const done = (state.missions && state.missions.done) || [];
+    const ratings = (state.missions && state.missions.ratings) || {};
+    const current = (state.missions && state.missions.current) || 0;
+    const items = MISSIONS.map((m, i) => {
+      const isDone = done.includes(m.id);
+      const isCurrent = i === current && !isDone;
+      const mark = isDone ? `DONE — rating ${ratings[m.id] || '—'}` : isCurrent ? 'CURRENT' : 'LOCKED';
+      return `<tr><td>${m.id}</td><td>${esc(m.title)}</td><td>${esc(m.giver)}</td><td>Act ${m.act}</td><td>${mark}</td><td>${fmtMoney(m.reward.money)} / ${m.reward.rp} RP</td></tr>`;
+    }).join('');
+    return `
+      <h3>MISSIONS</h3>
+      <table class="pause-table">
+        <tr><th>#</th><th>Title</th><th>Giver</th><th>Act</th><th>Status</th><th>Reward</th></tr>
+        ${items}
+      </table>
+      <p class="muted">Finish a mission to unlock the next one. Ratings: G (gold), S (silver), B (bronze).</p>`;
+  }
+
+  function renderStats() {
+    const s = state.stats || {};
+    const p = state.player || {};
+    const c = state.collectibles || {};
+    const nextRank = nextRankInfo(s.rp || 0);
+    // Completion: missions 50%, geckos 20%, jumps 10%, exports 10%, safehouse 10%.
+    const completion = (
+      ((s.missionsDone || 0) / 10) * 50 +
+      (((c.geckosFound || []).length) / 20) * 20 +
+      (((c.jumpsDone || []).length) / 5) * 10 +
+      (((c.exportsDone || []).length) / 5) * 10 +
+      (c.safehouseOwned ? 10 : 0)
+    ).toFixed(1);
     const rows = [
-      ['Missions done', `${s.missionsDone} / 10`],
-      ['Races won', `${s.racesWon}`],
-      ['Taxi fares', `${s.taxiFares}`],
-      ['Golden Geckos found', `${s.collectibles} / 20`],
-      ['Stunt jumps landed', `${s.jumps} / 5`],
-      ['District jobs done', `${s.jobs}`],
-      ['Exports delivered', `${s.exports} / 5`],
-      ['Money earned', `$${s.moneyEarned.toLocaleString('en-US')}`],
-      ['Cash on hand', `$${Math.floor(state.player.money).toLocaleString('en-US')}`],
-      ['Distance driven', `${(s.distanceDriven / 1000).toFixed(1)} km`],
-      ['Cars stolen', `${s.carsStolen}`],
-      ['Shots / hits', `${s.shotsFired} / ${s.hits} (${acc}%)`],
-      ['Time played', fmtTime(s.timePlayed)],
-      ['Day', `${state.day}`],
-      ['Rank', `${state.player.rp} RP`],
+      ['Rank', `${s.rank || 'ROOKIE'} (${s.rp || 0} RP${nextRank ? ` — ${nextRank.need} RP to ${nextRank.name}` : ' — top rank'})`],
+      ['Respect', String(s.respect || 0)],
+      ['Completion', `${completion}%`],
+      ['Missions completed', String(s.missionsDone || 0)],
+      ['Money earned (career)', fmtMoney(s.moneyEarned || 0)],
+      ['Money on hand', fmtMoney(p.money || 0)],
+      ['Distance driven', `${((s.distanceDriven || 0) / 1000).toFixed(1)} km`],
+      ['Cars stolen', String(s.carsStolen || 0)],
+      ['Cops escaped', String(s.copsEscaped || 0)],
+      ['Taken out', String(s.kills || 0)],
+      ['Longest jump', `${(s.longestJump || 0).toFixed(1)} m`],
+      ['Time played', fmtTime(s.timePlayed || 0)],
+      ['Golden Geckos', `${(c.geckosFound || []).length} / 20`],
+      ['Stunt jumps', `${(c.jumpsDone || []).length} / 5`],
+      ['Exports delivered', `${(c.exportsDone || []).length} / 5`],
+      ['Safehouse', c.safehouseOwned ? 'Casa Verde — owned' : 'Casa Verde — not owned ($2,000)'],
     ];
-    return '<div class="pause-stats">' + rows.map(([k, v]) => `<div class="pause-stat"><span>${k}</span><b>${v}</b></div>`).join('') + '</div>';
+    const body = rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td><strong>${esc(v)}</strong></td></tr>`).join('');
+    return `<h3>CAREER STATS</h3><table class="pause-table">${body}</table>`;
   }
 
-  function crewHtml() {
-    const crew = ctx.phone && ctx.phone.crewStatus ? ctx.phone.crewStatus() : [];
-    let html = '<div class="pause-crew">';
-    for (const r of crew) {
-      html += `<div class="pause-crew-row"><img class="crew-portrait" src="${portraitUrl(r.id)}" alt="">`
-        + `<div><b>${r.name}</b> <span class="phone-role">${r.role}</span><br>`
-        + `<span class="phone-ability">${r.short}${r.cost ? ` · $${r.cost}` : ''}</span> — ${r.state}</div></div>`;
+  function nextRankInfo(rp) {
+    const ladder = [
+      { at: 500, name: 'HUSTLER' },
+      { at: 1200, name: 'FIXER' },
+      { at: 2400, name: 'SHOT CALLER' },
+      { at: 4500, name: 'LEYENDA' },
+    ];
+    for (const r of ladder) {
+      if (rp < r.at) return { name: r.name, need: r.at - rp };
     }
-    const c = CREW.player;
-    html += `<div class="pause-crew-row"><img class="crew-portrait" src="${portraitUrl('player')}" alt="">`
-      + `<div><b>${c.name}</b> <span class="phone-role">${c.role}</span><br>`
-      + `<span class="phone-ability">You. The one doing the driving.</span></div></div>`;
-    return html + '</div>';
+    return null;
   }
 
-  function saveHtml() {
-    const save = ctx.save;
-    if (!save) return '<p>No save system.</p>';
-    let html = `<p>Autosave writes to slot ${save.currentSlot}. Saving also happens on mission complete and on pause.</p>`;
-    for (let slot = 1; slot <= 3; slot += 1) {
-      const info = save.slotInfo(slot);
-      const isCurrent = slot === save.currentSlot;
-      html += `<div class="pause-slot"><b>SLOT ${slot}${isCurrent ? ' · CURRENT' : ''}</b> — `
-        + (info
-          ? `saved ${new Date(info.savedAt).toLocaleString('en-US')} · $${info.money} · ${info.missionsDone.length}/10 missions`
-          : 'empty')
-        + ` <button class="garage-btn" data-save="${slot}">Save here</button>`
-        + (info ? ` <button class="garage-btn" data-load="${slot}">Load</button>`
-          + ` <button class="garage-btn" data-del="${slot}">Delete</button>` : '')
-        + '</div>';
+  function renderCrew() {
+    const cooldowns = (state.crew && (state.crew.cooldowns || state.crew.cooldown)) || {};
+    const cards = CREW_INFO.map((c) => {
+      const cd = cooldowns[c.id] || 0;
+      const status = cd > 0 ? `Cooling down (${Math.ceil(cd)}s)` : 'Ready';
+      return `<tr><td>${esc(c.name)}</td><td>${esc(c.role)}</td><td>[${c.key}]</td><td>${status}</td></tr>`;
+    }).join('');
+    return `
+      <h3>CREW</h3>
+      <table class="pause-table">
+        <tr><th>Name</th><th>Role</th><th>Call</th><th>Status</th></tr>
+        ${cards}
+      </table>
+      <p class="muted">Call the crew from the phone (F) or with the quick-call keys on the HUD cards. Detective El Gato is closing in — the crew is the only family Rook has left.</p>`;
+  }
+
+  function renderSave() {
+    const slots = listSlots();
+    const board = loadLeaderboard();
+    const slotRows = slots
+      .map((s) => `<tr><td>Slot ${s.slot}</td><td>${esc(s.label)}</td><td>${s.filled ? fmtMoney(s.money) : '—'}</td><td>${s.filled ? esc(s.rank) : '—'}</td></tr>`)
+      .join('');
+    const boardRows = board.length
+      ? board.map((e, i) => `<tr><td>${i + 1}</td><td>${esc(e.name)}</td><td>${e.rp} RP</td><td>${fmtMoney(e.money)}</td><td>${e.missionsDone} missions</td></tr>`).join('')
+      : '<tr><td colspan="5">No scores yet — finish a mission to set one.</td></tr>';
+    return `
+      <h3>SAVE / LOAD</h3>
+      <table class="pause-table">
+        <tr><th>Slot</th><th>Save</th><th>Money</th><th>Rank</th></tr>
+        ${slotRows}
+      </table>
+      <p>
+        <button data-save-slot="1">Save 1</button>
+        <button data-save-slot="2">Save 2</button>
+        <button data-save-slot="3">Save 3</button>
+        <button data-load-slot="1">Load 1</button>
+        <button data-load-slot="2">Load 2</button>
+        <button data-load-slot="3">Load 3</button>
+      </p>
+      <h3>LOCAL LEADERBOARD — TOP 5</h3>
+      <table class="pause-table">
+        <tr><th>#</th><th>Name</th><th>RP</th><th>Money</th><th>Missions</th></tr>
+        ${boardRows}
+      </table>`;
+  }
+
+  function render() {
+    if (!findEls()) return;
+    if (!bodyEl) {
+      bodyEl = menuEl.querySelector('.pause-body');
+      if (!bodyEl) return;
     }
-    return html;
-  }
-
-  function refresh() {
-    if (!el) return;
-    const tabs = el.querySelectorAll('.pause-tab');
-    tabs.forEach((b, i) => b.classList.toggle('active', TABS[i] === activeTab));
-    const body = el.querySelector('.pause-body');
-    if (activeTab === 'MAP') {
-      body.innerHTML = '<canvas id="pause-map" width="420" height="420"></canvas>'
-        + `<p class="pause-sub">${state.district} — ${state.districtStanding[state.district] ?? 50} standing · ${state.objective || ''}</p>`;
-      drawMap(body.querySelector('#pause-map'));
-    } else if (activeTab === 'MISSIONS') {
-      body.innerHTML = missionsHtml();
-    } else if (activeTab === 'STATS') {
-      body.innerHTML = statsHtml();
-    } else if (activeTab === 'CREW') {
-      body.innerHTML = crewHtml();
-    } else if (activeTab === 'SAVE') {
-      body.innerHTML = saveHtml();
-      body.querySelectorAll('[data-save]').forEach((b) => b.addEventListener('click', () => {
-        const slot = Number(b.dataset.save);
-        if (ctx.save.setSlot(slot)) {
-          if (ctx.save.save()) msg(`Saved to slot ${slot}.`, 'good');
-          refresh();
-        }
-      }));
-      body.querySelectorAll('[data-load]').forEach((b) => b.addEventListener('click', () => {
-        const slot = Number(b.dataset.load);
-        if (ctx.save.loadFrom(slot)) {
-          ctx.save.setSlot(slot);
-          msg(`Loaded slot ${slot}.`, 'good');
-          refresh();
-        } else {
-          msg(`Slot ${slot} is empty.`, 'bad');
-        }
-      }));
-      body.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', () => {
-        ctx.save.deleteSlot(Number(b.dataset.del));
-        refresh();
-      }));
+    const tabsHtml = TABS.map((t) => `<button data-tab="${t}" class="${t === tab ? 'active' : ''}">${t}</button>`).join('');
+    let tabsEl = menuEl.querySelector('.pause-tabs');
+    if (!tabsEl) {
+      tabsEl = document.createElement('div');
+      tabsEl.className = 'pause-tabs';
+      // .pause-body lives inside .overlay-card, not directly under
+      // #pause-menu, so insert the tab bar before it in its own parent;
+      // menuEl.insertBefore would throw NotFoundError here.
+      const parent = bodyEl.parentElement || menuEl;
+      parent.insertBefore(tabsEl, bodyEl);
     }
+    tabsEl.innerHTML = tabsHtml;
+    tabsEl.querySelectorAll('[data-tab]').forEach((b) => {
+      b.addEventListener('click', () => setTab(b.getAttribute('data-tab')));
+    });
+    let html = '';
+    if (tab === 'MAP') html = renderMap();
+    else if (tab === 'MISSIONS') html = renderMissions();
+    else if (tab === 'STATS') html = renderStats();
+    else if (tab === 'CREW') html = renderCrew();
+    else html = renderSave();
+    bodyEl.innerHTML = html;
+    bodyEl.querySelectorAll('[data-save-slot]').forEach((b) => {
+      b.addEventListener('click', () => {
+        const snap = saveSlot(Number(b.getAttribute('data-save-slot')), state);
+        emit('message', { text: snap ? `Saved to slot ${snap.slot}.` : 'Save failed — storage unavailable.' });
+        render();
+      });
+    });
+    bodyEl.querySelectorAll('[data-load-slot]').forEach((b) => {
+      b.addEventListener('click', () => {
+        const ok = loadSlot(Number(b.getAttribute('data-load-slot')), state);
+        emit('message', { text: ok ? 'Save loaded.' : 'That slot is empty.' });
+        if (ok) emit('save:loaded', {});
+        render();
+      });
+    });
   }
 
-  function show() {
-    build();
-    if (!el) return;
-    if (!shown) {
-      shown = true;
-      el.style.display = 'block';
-      refresh(); // refresh once per open; tab clicks refresh again
+  // Keyboard: P or Esc toggles. Number keys 1-5 switch tabs while open.
+  function handleKey(code) {
+    if (code === 'KeyP' || code === 'Escape') {
+      toggle();
+      return true;
     }
+    if (open) {
+      const idx = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5'].indexOf(code);
+      if (idx >= 0) {
+        setTab(TABS[idx]);
+        return true;
+      }
+    }
+    return false;
   }
 
-  function hide() {
-    shown = false;
-    if (el) el.style.display = 'none';
-  }
-
-  function update(dt) {
-    // Runs while playing (systems do not update while paused; main.js
-    // drives show()/hide() instead). Track time played for career stats.
-    if (state.screen === 'play') state.stats.timePlayed += dt;
-  }
-
-  return { update, show, hide, get isShown() { return shown; } };
+  return {
+    TABS,
+    CREW_INFO,
+    openMenu,
+    closeMenu,
+    toggle,
+    setTab,
+    render,
+    handleKey,
+    get isOpen() {
+      return open;
+    },
+    get tab() {
+      return tab;
+    },
+  };
 }

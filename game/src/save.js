@@ -1,277 +1,231 @@
-// Maravilla — persistence: 3 manual save slots + autosave + a local
-// top-5 leaderboard. Autosave writes to the current slot (state.saveSlot,
-// 1..3); the pause menu's SAVE tab switches slots, loads and deletes.
-// localStorage may be unavailable (headless / file:// contexts) — every
-// access is wrapped in try/catch and this module never throws.
+// save.js — 3 save slots plus a local top-5 leaderboard for MARAVILLA.
+// Written from the prose design spec. Slots persist in localStorage; a
+// round-trip restores money, mission progress, standing and collectibles
+// exactly. The leaderboard is local only — no network, ever.
 
-import { SAVE_KEY } from './config.js';
+const SLOT_KEY = (n) => `maravilla-save-${n}`;
+const BOARD_KEY = 'maravilla-leaderboard';
+const MAX_SLOTS = 3;
+const BOARD_SIZE = 5;
 
-const BOARD_KEY = 'maravilla-board-v1';
-const CURRENT_KEY = `${SAVE_KEY}.current`;
-const AUTOSAVE_EVERY = 30;
-
-function safeGet(key) {
+function storageAvailable() {
   try {
-    if (typeof localStorage === 'undefined') return null;
-    return localStorage.getItem(key);
+    return typeof localStorage !== 'undefined' && localStorage !== null;
+  } catch (e) {
+    return false;
+  }
+}
+
+function readStore(key) {
+  if (!storageAvailable()) return null;
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
   } catch (e) {
     return null;
   }
 }
 
-function safeSet(key, value) {
+function writeStore(key, value) {
+  if (!storageAvailable()) return false;
   try {
-    if (typeof localStorage === 'undefined') return false;
-    localStorage.setItem(key, value);
+    localStorage.setItem(key, JSON.stringify(value));
     return true;
   } catch (e) {
     return false;
   }
 }
 
-function safeRemove(key) {
-  try {
-    if (typeof localStorage === 'undefined') return;
-    localStorage.removeItem(key);
-  } catch (e) { /* ignore */ }
-}
-
-function slotKey(slot) {
-  return `${SAVE_KEY}.slot${slot}`;
-}
-
-export function createSave(ctx) {
-  const { state, events } = ctx;
-  const p = state.player;
-  let autosaveTimer = 0;
-  let lastScreen = state.screen;
-  let loaded = false;
-
-  function msg(text, kind = 'info') {
-    if (ctx.hud && ctx.hud.message) { ctx.hud.message(text, kind); return; }
-    if (state.messages) state.messages.push({ text, at: state.time, kind });
-  }
-
-  function snapshot() {
-    return {
-      v: 3,
-      savedAt: Date.now(),
-      money: p.money,
-      respect: p.respect,
-      rp: p.rp || 0,
-      day: state.day || 1,
-      districtStanding: { ...(state.districtStanding || {}) },
-      missionsDone: [...state.missionsDone],
-      ratings: { ...(state.ratings || {}) },
-      nextMission: state.nextMission,
-      garage: [...state.garage],
-      garageUpgrades: JSON.parse(JSON.stringify(state.garageUpgrades || {})),
-      stats: { ...state.stats },
-      weaponsOwned: [...(p.weaponsOwned || ['fists', 'pistol'])],
-      side: JSON.parse(JSON.stringify(state.side || {})),
-      saveSlot: state.saveSlot || 1,
-      playerHealth: p.health,
-      playerArmour: p.armour,
-      dayTime: state.dayTime,
-      playerPos: { x: p.x, z: p.z },
-    };
-  }
-
-  function applyData(data) {
-    if (!data || typeof data !== 'object') return false;
-    try {
-      if (typeof data.money === 'number') p.money = data.money;
-      if (typeof data.respect === 'number') p.respect = data.respect;
-      if (typeof data.rp === 'number') p.rp = data.rp;
-      if (typeof data.day === 'number') state.day = Math.max(1, data.day);
-      if (data.districtStanding && typeof data.districtStanding === 'object') {
-        Object.assign(state.districtStanding, data.districtStanding);
-      }
-      if (Array.isArray(data.missionsDone)) state.missionsDone = [...data.missionsDone];
-      if (data.ratings && typeof data.ratings === 'object') state.ratings = { ...data.ratings };
-      if (typeof data.nextMission === 'number') state.nextMission = data.nextMission;
-      if (Array.isArray(data.garage) && data.garage.length > 0) state.garage = [...data.garage];
-      if (data.garageUpgrades && typeof data.garageUpgrades === 'object') {
-        state.garageUpgrades = JSON.parse(JSON.stringify(data.garageUpgrades));
-      }
-      if (data.stats && typeof data.stats === 'object') {
-        Object.assign(state.stats, data.stats);
-      }
-      if (Array.isArray(data.weaponsOwned) && data.weaponsOwned.length > 0) {
-        p.weaponsOwned = [...data.weaponsOwned];
-      }
-      if (data.side && typeof data.side === 'object') {
-        Object.assign(state.side, JSON.parse(JSON.stringify(data.side)));
-      }
-      if (typeof data.saveSlot === 'number') state.saveSlot = data.saveSlot;
-      if (typeof data.playerHealth === 'number') p.health = data.playerHealth;
-      if (typeof data.playerArmour === 'number') p.armour = data.playerArmour;
-      if (typeof data.dayTime === 'number') state.dayTime = data.dayTime;
-      if (data.playerPos && typeof data.playerPos.x === 'number') {
-        p.x = data.playerPos.x;
-        p.z = data.playerPos.z;
-      }
-      loaded = true;
-      return true;
-    } catch (e) {
-      return false;
-    }
-  }
-
-  function readSlot(slot) {
-    try {
-      const raw = safeGet(slotKey(slot));
-      if (!raw) return null;
-      return JSON.parse(raw);
-    } catch (e) {
-      return null;
-    }
-  }
-
-  function saveTo(slot) {
-    if (slot < 1 || slot > 3) return false;
-    state.saveSlot = slot;
-    safeSet(CURRENT_KEY, String(slot));
-    return safeSet(slotKey(slot), JSON.stringify(snapshot()));
-  }
-
-  function save() {
-    return saveTo(state.saveSlot || 1);
-  }
-
-  function loadFrom(slot) {
-    const data = readSlot(slot);
-    if (!data) return false;
-    if (!applyData(data)) return false;
-    state.saveSlot = slot;
-    safeSet(CURRENT_KEY, String(slot));
-    return true;
-  }
-
-  function load() {
-    // Current slot, remembered across sessions; fall back to slot 1.
-    const current = Number(safeGet(CURRENT_KEY) || '1') || 1;
-    const slot = Math.min(3, Math.max(1, current));
-    // Legacy migration: a v1/v2 autosave under the bare key moves to slot 1.
-    if (!readSlot(1) && !readSlot(2) && !readSlot(3)) {
-      const legacy = safeGet(SAVE_KEY);
-      if (legacy) {
-        try {
-          const data = JSON.parse(legacy);
-          if (data && typeof data === 'object') {
-            safeSet(slotKey(1), legacy);
-            safeRemove(SAVE_KEY);
-          }
-        } catch (e) { /* not a save */ }
-      }
-    }
-    return loadFrom(slot);
-  }
-
-  function slotInfo(slot) {
-    const data = readSlot(slot);
-    if (!data) return null;
-    return {
-      savedAt: data.savedAt || 0,
-      money: data.money || 0,
-      missionsDone: Array.isArray(data.missionsDone) ? data.missionsDone : [],
-    };
-  }
-
-  function deleteSlot(slot) {
-    safeRemove(slotKey(slot));
-    return true;
-  }
-
-  function setSlot(slot) {
-    if (slot < 1 || slot > 3) return false;
-    state.saveSlot = slot;
-    safeSet(CURRENT_KEY, String(slot));
-    return true;
-  }
-
-  function clear() {
-    for (let s = 1; s <= 3; s += 1) safeRemove(slotKey(s));
-    safeRemove(CURRENT_KEY);
-    safeRemove(SAVE_KEY);
-    safeRemove(BOARD_KEY);
-  }
-
-  function getBoard() {
-    try {
-      const raw = safeGet(BOARD_KEY);
-      if (!raw) return [];
-      const arr = JSON.parse(raw);
-      return Array.isArray(arr) ? arr : [];
-    } catch (e) {
-      return [];
-    }
-  }
-
-  function recordRun() {
-    try {
-      const board = getBoard();
-      board.push({
-        missionsDone: state.stats.missionsDone,
-        money: p.money,
-        moneyEarned: state.stats.moneyEarned,
-        date: new Date().toISOString().slice(0, 10),
-      });
-      board.sort((a, b) => (b.missionsDone - a.missionsDone) || (b.money - a.money));
-      safeSet(BOARD_KEY, JSON.stringify(board.slice(0, 5)));
-      return board.slice(0, 5);
-    } catch (e) {
-      return [];
-    }
-  }
-
-  // --- load on boot, if a save exists.
-  const hadSave = load();
-  if (hadSave) {
-    msg('Save loaded — welcome back, Rook.', 'good');
-  }
-
-  // --- save on mission complete + when the finale completes.
-  if (events) {
-    events.on('mission', (d) => {
-      if (d && d.stage === 'complete') save();
-    });
-  }
-
-  function update(dt) {
-    // Autosave every 30 s while playing.
-    if (state.screen === 'play') {
-      autosaveTimer += dt;
-      if (autosaveTimer >= AUTOSAVE_EVERY) {
-        autosaveTimer = 0;
-        save();
-      }
-    }
-    // Save on pause (screen flips play -> paused).
-    if (lastScreen === 'play' && state.screen === 'paused') save();
-    // Record the run when the finale completes.
-    if (lastScreen !== 'complete' && state.screen === 'complete') {
-      save();
-      recordRun();
-    }
-    lastScreen = state.screen;
-  }
-
+// Snapshot the fields a round-trip must restore exactly. Numbers are kept
+// as plain numbers; lists are copied so later play never mutates a save.
+function snapshot(state) {
+  const s = state || {};
   return {
-    update,
-    save,
-    saveTo,
-    load,
-    loadFrom,
-    slotInfo,
-    deleteSlot,
-    setSlot,
-    clear,
-    getBoard,
-    recordRun,
-    get loaded() { return loaded; },
-    get currentSlot() { return state.saveSlot || 1; },
-    get saveKey() { return SAVE_KEY; },
-    get boardKey() { return BOARD_KEY; },
+    version: 1,
+    savedAt: (s.clock && s.clock.day) || 1,
+    day: (s.clock && s.clock.day) || 1,
+    minutes: (s.clock && s.clock.minutes) || 980,
+    player: {
+      x: (s.player && s.player.x) || 0,
+      z: (s.player && s.player.z) || 0,
+      heading: (s.player && s.player.heading) || 0,
+      health: (s.player && s.player.health) || 100,
+      armour: (s.player && s.player.armour) || 25,
+      money: (s.player && s.player.money) || 0,
+      onFoot: s.player ? !!s.player.onFoot : true,
+      currentCar: (s.player && s.player.currentCar) || null,
+      name: (s.player && s.player.name) || 'Rico "Rook" Vega',
+    },
+    wanted: {
+      level: (s.wanted && s.wanted.level) || 0,
+      heat: (s.wanted && s.wanted.heat) || 0,
+      crime: (s.wanted && s.wanted.crime) || '',
+    },
+    missions: {
+      current: (s.missions && s.missions.current) || 0,
+      stage: (s.missions && s.missions.stage) || 0,
+      done: Array.isArray(s.missions && s.missions.done) ? [...s.missions.done] : [],
+      ratings: s.missions && s.missions.ratings ? { ...s.missions.ratings } : {},
+    },
+    districts: {
+      standing: s.districts && s.districts.standing ? { ...s.districts.standing } : {},
+    },
+    collectibles: {
+      geckosFound: Array.isArray(s.collectibles && s.collectibles.geckosFound) ? [...s.collectibles.geckosFound] : [],
+      jumpsDone: Array.isArray(s.collectibles && s.collectibles.jumpsDone) ? [...s.collectibles.jumpsDone] : [],
+      exportsDone: Array.isArray(s.collectibles && s.collectibles.exportsDone) ? [...s.collectibles.exportsDone] : [],
+      safehouseOwned: !!(s.collectibles && s.collectibles.safehouseOwned),
+    },
+    garage: {
+      upgrades: s.garage && s.garage.upgrades ? JSON.parse(JSON.stringify(s.garage.upgrades)) : {},
+    },
+    weapons: {
+      current: (s.weapons && s.weapons.current) || 0,
+      owned: Array.isArray(s.weapons && s.weapons.owned) ? [...s.weapons.owned] : ['fists', 'pistol'],
+      ammo: s.weapons && s.weapons.ammo ? { ...s.weapons.ammo } : {},
+    },
+    stats: {
+      respect: (s.stats && s.stats.respect) || 0,
+      rp: (s.stats && s.stats.rp) || 0,
+      rank: (s.stats && s.stats.rank) || 'ROOKIE',
+      kills: (s.stats && s.stats.kills) || 0,
+      missionsDone: (s.stats && s.stats.missionsDone) || 0,
+      distanceDriven: (s.stats && s.stats.distanceDriven) || 0,
+      moneyEarned: (s.stats && s.stats.moneyEarned) || 0,
+      timePlayed: (s.stats && s.stats.timePlayed) || 0,
+    },
   };
 }
+
+function restore(state, snap) {
+  if (!snap || snap.version !== 1) return false;
+  state.clock = state.clock || {};
+  state.clock.day = snap.day;
+  state.clock.minutes = snap.minutes;
+  // Mutate the live objects in place instead of replacing them: the
+  // player, police and districts modules hold references to these
+  // objects and would keep moving the stale ones after a load.
+  if (!state.player) state.player = {};
+  Object.assign(state.player, snap.player);
+  if (!state.wanted) state.wanted = {};
+  Object.assign(state.wanted, snap.wanted);
+  state.missions = state.missions || {};
+  state.missions.current = snap.missions.current;
+  state.missions.stage = snap.missions.stage;
+  state.missions.done = [...snap.missions.done];
+  state.missions.ratings = { ...snap.missions.ratings };
+  state.districts = state.districts || {};
+  if (!state.districts.standing) state.districts.standing = {};
+  Object.assign(state.districts.standing, snap.districts.standing);
+  state.collectibles = state.collectibles || {};
+  state.collectibles.geckosFound = [...snap.collectibles.geckosFound];
+  state.collectibles.jumpsDone = [...snap.collectibles.jumpsDone];
+  state.collectibles.exportsDone = [...snap.collectibles.exportsDone];
+  state.collectibles.safehouseOwned = snap.collectibles.safehouseOwned;
+  state.garage = state.garage || {};
+  state.garage.upgrades = JSON.parse(JSON.stringify(snap.garage.upgrades));
+  state.weapons = state.weapons || {};
+  state.weapons.current = snap.weapons.current;
+  state.weapons.owned = [...snap.weapons.owned];
+  state.weapons.ammo = { ...snap.weapons.ammo };
+  if (!state.stats) state.stats = {};
+  Object.assign(state.stats, snap.stats);
+  return true;
+}
+
+function validSlot(n) {
+  const num = Number(n);
+  return num >= 1 && num <= MAX_SLOTS ? num : null;
+}
+
+// Save the current state into slot n (1-3). Returns the saved record or
+// null when storage is unavailable.
+export function saveSlot(n, state) {
+  const slot = validSlot(n);
+  if (!slot) return null;
+  const snap = snapshot(state);
+  snap.slot = slot;
+  snap.savedLabel = `Day ${snap.day} — $${snap.player.money} — ${snap.stats.rank}`;
+  if (!writeStore(SLOT_KEY(slot), snap)) return null;
+  return snap;
+}
+
+// Load slot n into the given state object. Returns true on success.
+export function loadSlot(n, state) {
+  const slot = validSlot(n);
+  if (!slot || !state) return false;
+  const snap = readStore(SLOT_KEY(slot));
+  if (!snap) return false;
+  return restore(state, snap);
+}
+
+// List all three slots: { slot, filled, label, money, rank, day } each.
+export function listSlots() {
+  const out = [];
+  for (let n = 1; n <= MAX_SLOTS; n += 1) {
+    const snap = readStore(SLOT_KEY(n));
+    if (!snap) {
+      out.push({ slot: n, filled: false, label: 'Empty slot', money: 0, rank: 'ROOKIE', day: 1 });
+    } else {
+      out.push({
+        slot: n,
+        filled: true,
+        label: snap.savedLabel || `Day ${snap.day}`,
+        money: snap.player.money,
+        rank: snap.stats.rank,
+        day: snap.day,
+        missionsDone: snap.stats.missionsDone,
+        rp: snap.stats.rp,
+      });
+    }
+  }
+  return out;
+}
+
+export function deleteSlot(n) {
+  const slot = validSlot(n);
+  if (!slot || !storageAvailable()) return false;
+  try {
+    localStorage.removeItem(SLOT_KEY(slot));
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// --- Local top-5 leaderboard ---------------------------------------------
+// Entries: { name, rp, money, missionsDone, day }. Ranked by RP, then
+// money. Stored locally; nothing leaves the machine.
+
+export function loadLeaderboard() {
+  const board = readStore(BOARD_KEY);
+  return Array.isArray(board) ? board.slice(0, BOARD_SIZE) : [];
+}
+
+export function recordScore(state, name) {
+  const entry = {
+    name: name || ((state.player && state.player.name) || 'Rook'),
+    rp: (state.stats && state.stats.rp) || 0,
+    money: (state.player && state.player.money) || 0,
+    missionsDone: (state.stats && state.stats.missionsDone) || 0,
+    day: (state.clock && state.clock.day) || 1,
+  };
+  const board = loadLeaderboard();
+  board.push(entry);
+  board.sort((a, b) => b.rp - a.rp || b.money - a.money);
+  const top = board.slice(0, BOARD_SIZE);
+  writeStore(BOARD_KEY, top);
+  return { board: top, rank: top.indexOf(entry) + 1 };
+}
+
+export function clearLeaderboard() {
+  if (!storageAvailable()) return false;
+  try {
+    localStorage.removeItem(BOARD_KEY);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+export { snapshot, restore, MAX_SLOTS, BOARD_SIZE };

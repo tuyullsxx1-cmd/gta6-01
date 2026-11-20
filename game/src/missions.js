@@ -1,580 +1,707 @@
-// Maravilla — story missions (10, in MISSION_NAMES order) + side activities
-// (street races, taxi fares). Small stage machines: go-to marker, checkpoints,
-// timers, lose-the-cops escapes. All dialogue is original writing.
-// Communicates only via state.* and events; never imports another system.
+// missions.js — story missions, street races and taxi fares for MARAVILLA.
+// Written from the prose design spec. No code was read or copied from any
+// earlier build. All mission data lives in MISSIONS; createMissions drives
+// stage flow, objectives, dialogue, ratings and rewards.
 
-import * as THREE from 'three';
-import { CITY, MISSION_NAMES, ACTS, MISSION_PARS, ratingForTime } from './config.js';
+const DISTRICTS = [
+  'Marina Alba',
+  'El Faro',
+  'Centro Alba',
+  'Paseo del Mar',
+  'Miramar',
+  'Estadio Sol',
+];
 
-const MARKER_RADIUS = 6;
-const CHECKPOINT_RADIUS = 9;
+// Shared map anchors (metres, city is roughly 600 x 600, centre 0,0).
+export const PLACES = {
+  lockup: { x: -250, z: 200, label: 'Marina Alba lockup' },
+  garage: { x: 30, z: 120, label: "Celia's Garage" },
+  pier: { x: -260, z: -40, label: 'The pier' },
+  banco: { x: 60, z: -120, label: 'Banco Alba' },
+  estadio: { x: 220, z: 180, label: 'Estadio Sol' },
+  hotel: { x: 180, z: -200, label: 'Hotel Miramar' },
+  lighthouse: { x: -260, z: -240, label: 'Faro de Maravilla' },
+  market: { x: 20, z: 40, label: 'Centro Alba night market' },
+  dock: { x: -280, z: 120, label: 'Marina Alba dock' },
+  safehouse: { x: 140, z: 210, label: 'Casa Verde' },
+  impound: { x: -180, z: -190, label: 'El Faro impound lot' },
+  stadiumGate: { x: 190, z: 150, label: 'Estadio Sol gate' },
+};
 
-function dist(ax, az, bx, bz) {
-  return Math.hypot(ax - bx, az - bz);
+// ---------------------------------------------------------------------------
+// Mission data: 10 named story missions in 3 acts.
+// Every stage has an objective string and a target position {x, z}.
+// Rewards: money, RP (250 per mission is the standard), standing district.
+// ---------------------------------------------------------------------------
+export const MISSIONS = [
+  {
+    id: 1,
+    act: 1,
+    title: 'FIRST KEYS',
+    giver: 'Mama Luz',
+    district: 'Marina Alba',
+    parSeconds: 420,
+    reward: { money: 400, rp: 250, standing: 8 },
+    briefing:
+      'Rook is home. First job: make a hot car look clean before the sun goes down.',
+    dialogue: [
+      { speaker: 'Mama Luz', text: 'Rook. Five years, and you still walk like the city owes you money.' },
+      { speaker: 'Rico Vega', text: 'It does, Luz. I just came to collect.' },
+      { speaker: 'Mama Luz', text: 'Then start small. There is a sedan sitting in the Marina Alba lockup with plates that will get you stopped before the first corner.' },
+      { speaker: 'Mama Luz', text: 'Swap the plates on it. Then take it to Celia at the garage and register it clean. No noise, no heat, no shortcuts.' },
+      { speaker: 'Rico Vega', text: 'Plates, then paper. Got it. Tell Celia I am coming.' },
+    ],
+    stages: [
+      { name: 'Reach the lockup', objective: 'Go to the Marina Alba lockup', target: { ...PLACES.lockup }, radius: 14 },
+      { name: 'Swap the plates', objective: 'Swap the plates on the sedan', target: { ...PLACES.lockup }, radius: 8, action: 'swap' },
+      { name: 'Drive to the garage', objective: "Drive the car to Celia's Garage", target: { ...PLACES.garage }, radius: 14, needsCar: true },
+      { name: 'Register it clean', objective: 'Register the car clean at the garage', target: { ...PLACES.garage }, radius: 8, action: 'register' },
+    ],
+  },
+  {
+    id: 2,
+    act: 1,
+    title: 'THE WELCOME WAGON',
+    giver: 'Big Marlon',
+    district: 'Centro Alba',
+    parSeconds: 480,
+    reward: { money: 600, rp: 250, standing: 8 },
+    briefing:
+      'The night market pays for protection. Marlon wants the rounds done right.',
+    dialogue: [
+      { speaker: 'Big Marlon', text: 'Rook! You are back and already skinny. The market missed you, little brother.' },
+      { speaker: 'Rico Vega', text: 'I missed the food. The work, less so.' },
+      { speaker: 'Big Marlon', text: 'Three stalls owe this week. Be polite. Be firm. Be Marlon-sized about it, even if you are not Marlon-sized.' },
+      { speaker: 'Big Marlon', text: 'Stall one by the lanterns, stall two by the fish crates, stall three by the flower carts. Then bring it all back to me.' },
+    ],
+    stages: [
+      { name: 'First stall', objective: 'Collect from the lantern stall', target: { x: 20, z: 40 }, radius: 10, action: 'collect' },
+      { name: 'Second stall', objective: 'Collect from the fish-crate stall', target: { x: 70, z: 10 }, radius: 10, action: 'collect' },
+      { name: 'Third stall', objective: 'Collect from the flower-cart stall', target: { x: -10, z: -30 }, radius: 10, action: 'collect' },
+      { name: 'Bring it home', objective: 'Bring the takings back to Big Marlon', target: { x: 190, z: 150 }, radius: 12 },
+    ],
+  },
+  {
+    id: 3,
+    act: 1,
+    title: 'NIGHT SHIFT',
+    giver: 'Celia Reyes',
+    district: 'Centro Alba',
+    parSeconds: 540,
+    reward: { money: 800, rp: 250, standing: 8 },
+    briefing:
+      'Celia needs eyes on the city. Plant her taps, stay out of sight.',
+    dialogue: [
+      { speaker: 'Celia Reyes', text: 'Welcome home, Rook. You look exactly like your mugshot. Older, though.' },
+      { speaker: 'Rico Vega', text: 'Charming as ever, Celia. What do you need?' },
+      { speaker: 'Celia Reyes', text: 'Two little boxes, two big buildings. One on Banco Alba, one on Hotel Miramar. Stick them where nobody looks — vents, service doors, the boring places.' },
+      { speaker: 'Celia Reyes', text: 'Then come back to the garage and I will show you what the city is saying.' },
+    ],
+    stages: [
+      { name: 'Banco Alba tap', objective: 'Plant a tap on Banco Alba', target: { ...PLACES.banco }, radius: 10, action: 'plant' },
+      { name: 'Hotel Miramar tap', objective: 'Plant a tap on Hotel Miramar', target: { ...PLACES.hotel }, radius: 10, action: 'plant' },
+      { name: 'Back to the garage', objective: "Return to Celia's Garage", target: { ...PLACES.garage }, radius: 12 },
+    ],
+  },
+  {
+    id: 4,
+    act: 2,
+    title: "EL GATO'S LEASH",
+    giver: 'Mama Luz',
+    district: 'El Faro',
+    parSeconds: 600,
+    reward: { money: 1000, rp: 250, standing: 8 },
+    briefing:
+      'El Gato has a file on the crew. Steal it back from the impound lot.',
+    dialogue: [
+      { speaker: 'Mama Luz', text: 'El Gato is not a cop, Rook. He is a collector. And he has collected us.' },
+      { speaker: 'Mama Luz', text: 'There is a file in the El Faro impound lot with every name we care about. It burns tonight, or we do.' },
+      { speaker: 'Rico Vega', text: 'I will get the file. What about the tail he puts on me after?' },
+      { speaker: 'Mama Luz', text: 'Lose them in the streets. You know this city better than any badge.' },
+    ],
+    stages: [
+      { name: 'Reach the impound', objective: 'Reach the El Faro impound lot', target: { ...PLACES.impound }, radius: 14 },
+      { name: 'Grab the file', objective: 'Take the crew file from the lockbox', target: { ...PLACES.impound }, radius: 8, action: 'grab' },
+      { name: 'Lose the tail', objective: 'Lose the police tail — drop your wanted level', target: { x: 0, z: 0 }, radius: 999, needsClear: true },
+      { name: 'Deliver the file', objective: 'Deliver the file to Mama Luz', target: { x: -30, z: 90 }, radius: 12 },
+    ],
+  },
+  {
+    id: 5,
+    act: 2,
+    title: 'SHARKS AT THE PIER',
+    giver: 'Big Marlon',
+    district: 'Paseo del Mar',
+    parSeconds: 600,
+    reward: { money: 1200, rp: 250, standing: 8 },
+    briefing:
+      'A rival crew is muscling in on the pier. Marlon wants them gone.',
+    dialogue: [
+      { speaker: 'Big Marlon', text: 'Los Tiburones. Sharks. They think the pier is theirs now.' },
+      { speaker: 'Rico Vega', text: 'And what do we think?' },
+      { speaker: 'Big Marlon', text: 'We think the pier belongs to whoever is still standing on it at the end. Go stand on it, Rook.' },
+      { speaker: 'Big Marlon', text: 'Three of them, loud and proud. Send them home. Then come back and tell me the water is ours again.' },
+    ],
+    stages: [
+      { name: 'Reach the pier', objective: 'Go to the pier', target: { ...PLACES.pier }, radius: 16 },
+      { name: 'Clear the pier', objective: 'Deal with the three rivals at the pier', target: { ...PLACES.pier }, radius: 20, action: 'clear', count: 3 },
+      { name: 'Report back', objective: 'Report back to Big Marlon', target: { x: 190, z: 150 }, radius: 12 },
+    ],
+  },
+  {
+    id: 6,
+    act: 2,
+    title: 'SIRENS IN THE RAIN',
+    giver: 'Celia Reyes',
+    district: 'Estadio Sol',
+    parSeconds: 660,
+    reward: { money: 1400, rp: 250, standing: 8 },
+    briefing:
+      'A getaway van, two checkpoints, and a city full of sirens. Drive like Celia taught you.',
+    dialogue: [
+      { speaker: 'Celia Reyes', text: 'I borrowed a van. Do not ask from where. It is parked at the stadium gate and it is full of things we cannot explain.' },
+      { speaker: 'Rico Vega', text: 'Full of what?' },
+      { speaker: 'Celia Reyes', text: 'Full of "drive carefully". Two checkpoints on the route — I will ping them to your map. Pass both, bring the van to the garage, and nobody asks anything.' },
+      { speaker: 'Rico Vega', text: 'And if the sirens find me?' },
+      { speaker: 'Celia Reyes', text: 'Then drive faster than the sirens. You have done it before.' },
+    ],
+    stages: [
+      { name: 'Pick up the van', objective: 'Pick up the van at Estadio Sol gate', target: { ...PLACES.stadiumGate }, radius: 12, needsCar: true },
+      { name: 'Checkpoint one', objective: 'Pass the first checkpoint on Paseo del Mar', target: { x: -120, z: -60 }, radius: 14, needsCar: true },
+      { name: 'Checkpoint two', objective: 'Pass the second checkpoint in Centro Alba', target: { x: 40, z: 60 }, radius: 14, needsCar: true },
+      { name: 'Deliver the van', objective: 'Deliver the van to the garage', target: { ...PLACES.garage }, radius: 12, needsCar: true },
+    ],
+  },
+  {
+    id: 7,
+    act: 2,
+    title: 'THE INFORMANT',
+    giver: 'Mama Luz',
+    district: 'El Faro',
+    parSeconds: 660,
+    reward: { money: 1600, rp: 250, standing: 8 },
+    briefing:
+      'A man at the lighthouse knows what El Gato is planning. Keep him alive.',
+    dialogue: [
+      { speaker: 'Mama Luz', text: 'There is a man at the lighthouse who used to count El Gato’s money. Now he wants to count his own days instead.' },
+      { speaker: 'Mama Luz', text: 'He will tell us everything — if he lives to the safehouse. El Gato’s people will try to make sure he does not.' },
+      { speaker: 'Rico Vega', text: 'I will bring him in, Luz. Nobody touches my passengers.' },
+      { speaker: 'Mama Luz', text: 'Good. Casa Verde is waiting. Do not stop for anything.' },
+    ],
+    stages: [
+      { name: 'Meet the informant', objective: 'Meet the informant at the lighthouse', target: { ...PLACES.lighthouse }, radius: 12 },
+      { name: 'Survive the ambush', objective: 'Survive the ambush — stay alive', target: { ...PLACES.lighthouse }, radius: 30, action: 'survive', surviveSeconds: 30 },
+      { name: 'Get him to safety', objective: 'Deliver the informant to Casa Verde', target: { ...PLACES.safehouse }, radius: 12 },
+    ],
+  },
+  {
+    id: 8,
+    act: 3,
+    title: 'HOT PURSUIT',
+    giver: 'Celia Reyes',
+    district: 'Marina Alba',
+    parSeconds: 720,
+    reward: { money: 2000, rp: 250, standing: 8 },
+    briefing:
+      'The net is closing. Grab the getaway car, break the cordon, and vanish.',
+    dialogue: [
+      { speaker: 'Celia Reyes', text: 'Rook, they are coming. Every unit El Gato owns is rolling toward Marina Alba.' },
+      { speaker: 'Rico Vega', text: 'Then we give them a chase they will tell stories about.' },
+      { speaker: 'Celia Reyes', text: 'The getaway car is at the lockup — the fast one, plates already swapped. Get to the pier checkpoint, then disappear.' },
+      { speaker: 'Celia Reyes', text: 'Listen to me: do not come back until the heat is GONE. Not low. Gone. They will be watching every street until then.' },
+    ],
+    stages: [
+      { name: 'Grab the getaway car', objective: 'Grab the getaway car at the lockup', target: { ...PLACES.lockup }, radius: 12, needsCar: true },
+      { name: 'Break the cordon', objective: 'Break through to the pier checkpoint', target: { x: -200, z: 0 }, radius: 16, needsCar: true },
+      {
+        name: 'Vanish',
+        objective: 'Escape — lose all heat before returning',
+        target: { x: -30, z: 90 },
+        radius: 12,
+        needsClear: true,
+        blockedNote: 'Stay hidden until the heat clears — the escape only counts once wanted is gone.',
+      },
+    ],
+  },
+  {
+    id: 9,
+    act: 3,
+    title: 'THE LAST SCORE',
+    giver: 'Mama Luz',
+    district: 'Centro Alba',
+    parSeconds: 780,
+    reward: { money: 3500, rp: 250, standing: 8 },
+    briefing:
+      'Banco Alba. The vault. The haul that ends all of this — if the crew can pull it off.',
+    dialogue: [
+      { speaker: 'Mama Luz', text: 'One last score, Rook. I have said it before and I have meant it never. This time I mean it.' },
+      { speaker: 'Mama Luz', text: 'Banco Alba keeps its old money in a vault that has not been opened in years. Celia has the codes. Marlon has the muscle. You have the driving.' },
+      { speaker: 'Rico Vega', text: 'And El Gato?' },
+      { speaker: 'Mama Luz', text: 'El Gato will be there. Count on it. Get in, crack the vault, get the haul to the dock — and do not look back.' },
+    ],
+    stages: [
+      { name: 'Reach Banco Alba', objective: 'Get to Banco Alba', target: { ...PLACES.banco }, radius: 14 },
+      { name: 'Crack the vault', objective: 'Crack the vault — hold the position', target: { ...PLACES.banco }, radius: 8, action: 'crack', holdSeconds: 20 },
+      { name: 'Haul to the dock', objective: 'Carry the haul to the Marina Alba dock', target: { ...PLACES.dock }, radius: 14, needsCar: true },
+      { name: 'Lose the heat', objective: 'Lose the heat before the handoff', target: { ...PLACES.dock }, radius: 20, needsClear: true },
+    ],
+  },
+  {
+    id: 10,
+    act: 3,
+    title: 'LEYENDA',
+    giver: 'Mama Luz',
+    district: 'El Faro',
+    parSeconds: 840,
+    reward: { money: 5000, rp: 250, standing: 8 },
+    briefing:
+      'The final run. One last drive to the lighthouse, one last face-off with El Gato, and a boat waiting at the pier.',
+    dialogue: [
+      { speaker: 'Mama Luz', text: 'It is done, Rook. The money is moving. All that is left is you — and him.' },
+      { speaker: 'Rico Vega', text: 'El Gato.' },
+      { speaker: 'Mama Luz', text: 'He will be at the lighthouse. He has waited five years to finish this. Go and finish it first.' },
+      { speaker: 'Mama Luz', text: 'Then the pier. There is a boat with no name and no questions. Maravilla will remember us, Rook. Make sure it remembers us free.' },
+    ],
+    stages: [
+      { name: 'To the lighthouse', objective: 'Drive to the Faro de Maravilla', target: { ...PLACES.lighthouse }, radius: 14 },
+      { name: 'Face El Gato', objective: 'Confront Detective El Gato', target: { ...PLACES.lighthouse }, radius: 10, action: 'confront' },
+      { name: 'The boat', objective: 'Reach the boat at the pier', target: { ...PLACES.pier }, radius: 14 },
+    ],
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Street races: 3 timed checkpoint races with generous timers.
+// ---------------------------------------------------------------------------
+export const RACES = [
+  {
+    id: 'race-paseo',
+    name: 'Paseo Sprint',
+    district: 'Paseo del Mar',
+    timeLimit: 150,
+    reward: 500,
+    checkpoints: [
+      { x: -200, z: -80 },
+      { x: -80, z: -140 },
+      { x: 60, z: -120 },
+      { x: 160, z: -60 },
+      { x: 120, z: 60 },
+      { x: -40, z: 40 },
+    ],
+  },
+  {
+    id: 'race-faro',
+    name: 'Faro Loop',
+    district: 'El Faro',
+    timeLimit: 180,
+    reward: 700,
+    checkpoints: [
+      { x: -260, z: -240 },
+      { x: -120, z: -220 },
+      { x: 0, z: -180 },
+      { x: 40, z: -60 },
+      { x: -100, z: -40 },
+      { x: -220, z: -140 },
+    ],
+  },
+  {
+    id: 'race-estadio',
+    name: 'Estadio Grand Prix',
+    district: 'Estadio Sol',
+    timeLimit: 200,
+    reward: 900,
+    checkpoints: [
+      { x: 220, z: 180 },
+      { x: 240, z: 40 },
+      { x: 160, z: -60 },
+      { x: 60, z: 20 },
+      { x: 120, z: 140 },
+      { x: 220, z: 180 },
+    ],
+  },
+];
+
+// Taxi fare spots (pickup -> dropoff pairs around the city).
+export const TAXI_STOPS = [
+  { from: { x: -250, z: 200, label: 'Marina Alba lockup' }, to: { x: 180, z: -200, label: 'Hotel Miramar' } },
+  { from: { x: 20, z: 40, label: 'Centro Alba market' }, to: { x: -260, z: -240, label: 'Faro de Maravilla' } },
+  { from: { x: 220, z: 180, label: 'Estadio Sol' }, to: { x: -260, z: -40, label: 'The pier' } },
+  { from: { x: 180, z: -200, label: 'Hotel Miramar' }, to: { x: 60, z: -120, label: 'Banco Alba' } },
+  { from: { x: -120, z: -60, label: 'Paseo del Mar beach' }, to: { x: 140, z: 210, label: 'Casa Verde' } },
+];
+
+function dist(a, b) {
+  const dx = a.x - b.x;
+  const dz = a.z - b.z;
+  return Math.sqrt(dx * dx + dz * dz);
 }
 
-export function createMissions(ctx) {
-  const { state, scene, events, rng } = ctx;
-  const THREE_ = ctx.THREE || THREE;
-  const p = state.player;
-  const rand = rng || Math.random;
-  const P = CITY.places;
+function clampStanding(v) {
+  return Math.max(-100, Math.min(100, v));
+}
 
-  let markerMesh = null;
-  let flagMesh = null;
-  let subtitleQueue = [];
-  let subtitleTimer = 0;
-  let subtitleEl = null;
+export function createMissions(state, bus) {
+  const emit = (name, data) => {
+    if (bus && typeof bus.emit === 'function') bus.emit(name, data);
+  };
 
-  // --- marker: a floating yellow diamond + beacon, moved to the active point.
-  if (scene) {
-    markerMesh = new THREE_.Group();
-    const diamond = new THREE_.Mesh(
-      new THREE_.OctahedronGeometry(1.6),
-      new THREE_.MeshBasicMaterial({ color: 0xffd94d }),
-    );
-    diamond.position.y = 3.2;
-    markerMesh.add(diamond);
-    const beam = new THREE_.Mesh(
-      new THREE_.CylinderGeometry(1.1, 1.1, 30, 12, 1, true),
-      new THREE_.MeshBasicMaterial({
-        color: 0xffd94d, transparent: true, opacity: 0.16,
-        side: THREE_.DoubleSide, depthWrite: false,
-      }),
-    );
-    beam.position.y = 15;
-    markerMesh.add(beam);
-    markerMesh.visible = false;
-    markerMesh.userData.diamond = diamond;
-    scene.add(markerMesh);
+  // Runtime progress lives on the module, mirrored into state.missions so
+  // save/load and the HUD can read it without knowing internals.
+  const progress = {
+    index: (state.missions && state.missions.current) || 0,
+    stage: (state.missions && state.missions.stage) || 0,
+    started: false,
+    stageStartedAt: 0,
+    missionStartedAt: 0,
+    actionCount: 0,
+    holdTimer: 0,
+    surviveTimer: 0,
+    elapsed: 0,
+    deaths: 0,
+  };
 
-    flagMesh = new THREE_.Group();
-    const pole = new THREE_.Mesh(new THREE_.CylinderGeometry(0.09, 0.09, 5, 6),
-      new THREE_.MeshLambertMaterial({ color: 0x2c313a }));
-    pole.position.y = 2.5;
-    flagMesh.add(pole);
-    const flag = new THREE_.Mesh(new THREE_.PlaneGeometry(1.6, 1),
-      new THREE_.MeshBasicMaterial({ color: 0x3f8a4a, side: THREE_.DoubleSide }));
-    flag.position.set(0.85, 4.4, 0);
-    flagMesh.add(flag);
-    flagMesh.visible = false;
-    scene.add(flagMesh);
+  const race = { active: null, checkpoint: 0, timeLeft: 0 };
+  const taxi = { active: null, phase: 'idle', timeLeft: 0, fare: 0 };
+
+  function mission() {
+    return MISSIONS[progress.index] || null;
   }
 
-  // --- text helpers: hud first, DOM/state fallback.
-  function say(text) {
-    if (ctx.hud && ctx.hud.subtitle) { ctx.hud.subtitle(text); return; }
-    subtitleQueue.push(text);
-  }
-  function banner(title, sub) {
-    if (ctx.hud && ctx.hud.banner) { ctx.hud.banner(title, sub); return; }
-    if (typeof document !== 'undefined') {
-      const b = document.getElementById('mission-banner');
-      const t = document.getElementById('mission-title');
-      const s = document.getElementById('mission-sub');
-      if (b && t && s) {
-        t.textContent = title;
-        s.textContent = sub || '';
-        b.style.display = 'block';
-        setTimeout(() => { b.style.display = 'none'; }, 4200);
-      }
-    }
-  }
-  function msg(text, kind = 'info') {
-    if (ctx.hud && ctx.hud.message) { ctx.hud.message(text, kind); return; }
-    if (state.messages) state.messages.push({ text, at: state.time, kind });
-  }
-  function setObjective(text) {
-    state.objective = text;
-    if (ctx.hud && ctx.hud.setObjective) ctx.hud.setObjective(text);
-  }
-  function setMarker(x, z) {
-    if (state.mission) state.mission.marker = { x, z };
-    if (markerMesh) {
-      markerMesh.position.set(x, 0, z);
-      markerMesh.visible = true;
-    }
-  }
-  function hideMarker() {
-    if (markerMesh) markerMesh.visible = false;
+  function stage() {
+    const m = mission();
+    return m ? m.stages[progress.stage] : null;
   }
 
-  // A bust or waste mid-mission fails it (player/police emit 'player-down').
-  if (events) {
-    events.on('player-down', (d) => {
-      if (state.mission) failMission(d && d.kind ? d.kind : 'caught');
-    });
+  function syncState() {
+    if (!state.missions) state.missions = {};
+    state.missions.current = progress.index;
+    state.missions.stage = progress.stage;
+    const m = mission();
+    const s = stage();
+    state.missions.objective = s ? s.objective : m ? 'Mission complete' : 'No mission';
+    state.missions.objectivePos = s ? { x: s.target.x, z: s.target.z } : null;
+    state.missions.markerVisible = !!s;
+    state.missions.title = m ? m.title : '';
+    state.missions.giver = m ? m.giver : '';
+    state.missions.payout = m ? m.reward.money : 0;
+    state.missions.stageName = s ? s.name : '';
+    state.missions.stageTotal = m ? m.stages.length : 0;
   }
 
-  // --- mission definitions. Stages: { kind, at, text, timer, next }.
-  // kind: 'goto' (reach marker), 'checkpoints' (sequence), 'escape' (reach
-  // marker while wanted, then lose the heat), 'deliver' (goto with timer).
-  const DEFS = [
-    {
-      giver: 'luz',
-      briefing: [
-        "Mama Luz: Rook. Five years, and this city still owes you a set of wheels. Celia's got one — but the plates on it are hot.",
-        "Celia: The plates on the Vagabundo belong to a cop's cousin. Swap them at the marina lockup, then bring the car home and I'll register it clean.",
-      ],
-      stages: [
-        { kind: 'goto', at: P.garage, name: 'MEET CELIA', text: "Go to Celia's Garage" },
-        { kind: 'deliver', at: P.marina, name: 'PLATE SWAP', text: 'Swap the plates at the Marina Alba lockup', timer: 240 },
-        { kind: 'deliver', at: P.garage, name: 'REGISTER', text: 'Bring the clean plates back to the garage', timer: 240 },
-      ],
-      reward: { money: 400, respect: 10 },
-    },
-    {
-      giver: 'luz',
-      briefing: [
-        "Mama Luz: Banco Alba keeps its cash in a van, not a vault. Grab the bag, Rook.",
-        "Mama Luz: In and out. The bank's guards are slow, but El Gato is not.",
-      ],
-      stages: [
-        { kind: 'goto', at: P.bank, name: 'THE VAN', text: 'Reach Banco Alba' },
-        { kind: 'deliver', at: P.marina, name: 'GETAWAY', text: 'Get the bag to Marina Alba', timer: 200 },
-      ],
-      reward: { money: 900, respect: 10 },
-    },
-    {
-      giver: 'celia',
-      briefing: [
-        "Celia: My cousin's taxi got impounded and the fares are piling up. Drive it, Rook.",
-        "Celia: Three stops. Don't keep the passengers waiting — and don't scratch the paint.",
-      ],
-      stages: [
-        { kind: 'goto', at: P.garage, name: 'THE CAB', text: "Pick up the Toro Taxi at the garage" },
-        { kind: 'checkpoints', at: [P.mercado, P.hotel, P.stadium], name: 'THREE STOPS', text: 'Drop off passengers', timer: 300 },
-      ],
-      reward: { money: 700, respect: 10, garage: 'cometa' },
-    },
-    {
-      giver: 'tito',
-      briefing: [
-        "Tito: The Cometa's engine is singing, but she needs parts from the marina. Long way, Rook.",
-        "Tito: Take the coast road. Paseo del Mar at sunset — that's the whole point of this city.",
-      ],
-      stages: [
-        { kind: 'goto', at: P.marina, name: 'COAST ROAD', text: 'Collect the engine parts at Marina Alba' },
-        { kind: 'deliver', at: P.garage, name: 'BRING IT BACK', text: 'Bring the parts back to the garage', timer: 260 },
-      ],
-      reward: { money: 800, respect: 10 },
-    },
-    {
-      giver: 'marlon',
-      briefing: [
-        "Big Marlon: Fierro Arms is holding a shipment with my name on it. Go collect, Rook.",
-        "Big Marlon: If anyone asks, you're picking up plumbing supplies. Heavy plumbing.",
-      ],
-      stages: [
-        { kind: 'goto', at: P.gunshop, name: 'THE SHIPMENT', text: 'Reach Fierro Arms' },
-        { kind: 'deliver', at: P.garage, name: 'HEAVY PLUMBING', text: 'Bring the shipment to the garage', timer: 220 },
-      ],
-      reward: { money: 1000, respect: 10, ammo: true, weapon: 'smg' },
-    },
-    {
-      giver: 'celia',
-      briefing: [
-        "Celia: Night shift. A client needs a quiet ride from the hotel to the pier. No questions.",
-        "Celia: Keep it under the speed limit past Maravilla PD. El Gato works nights.",
-      ],
-      stages: [
-        { kind: 'goto', at: P.hotel, name: 'THE CLIENT', text: 'Pick up the client at Hotel Miramar' },
-        { kind: 'deliver', at: P.pier, name: 'QUIET RIDE', text: 'Drop the client at Miramar Pier', timer: 280 },
-      ],
-      reward: { money: 1100, respect: 10, garage: 'camioneta' },
-    },
-    {
-      giver: 'luz',
-      briefing: [
-        "Mama Luz: A boat is coming in at the pier with cargo nobody should see. Be there.",
-        "Mama Luz: Take the cargo to the stadium lockup. Fast, quiet, no souvenirs.",
-      ],
-      stages: [
-        { kind: 'goto', at: P.pier, name: 'THE BOAT', text: 'Meet the boat at Miramar Pier' },
-        { kind: 'deliver', at: P.stadium, name: 'NO SOUVENIRS', text: 'Deliver the cargo to Estadio Sol', timer: 240 },
-      ],
-      reward: { money: 1400, respect: 10, weapon: 'shotgun' },
-    },
-    {
-      giver: 'gato',
-      briefing: [
-        "El Gato: Vega. I know you're in my city. Come say hello at HQ — or run. Your choice.",
-        "Celia: That's a trap, Rook. Lose the tail, then meet me at the marina.",
-      ],
-      stages: [
-        { kind: 'goto', at: P.policeHq, name: 'THE TRAP', text: 'Show yourself at Maravilla PD HQ' },
-        { kind: 'escape', at: P.marina, name: 'LOSE THE TAIL', text: 'Lose the cops, then reach Marina Alba', timer: 300, require: 'lose' },
-      ],
-      reward: { money: 1500, respect: 10 },
-      heatOnStage: { 1: 3 },
-    },
-    {
-      giver: 'marlon',
-      briefing: [
-        "Big Marlon: I owe a man at the stadium. You drive, I talk. Then we both walk away.",
-        "Big Marlon: If it goes loud, you already know the way out. Through them.",
-      ],
-      stages: [
-        { kind: 'goto', at: P.stadium, name: 'THE MEETING', text: 'Meet Marlon at Estadio Sol' },
-        { kind: 'deliver', at: P.hospital, name: 'GET HIM OUT', text: 'Get Marlon to Clinica Sol, fast', timer: 200 },
-      ],
-      reward: { money: 1800, respect: 10, weapon: 'rifle' },
-    },
-    {
-      giver: 'luz',
-      briefing: [
-        "Mama Luz: One last score, Rook. Banco Alba, the vault, the whole bay watching.",
-        "Mama Luz: Grab it, run the heat, and meet us at the pier. Then we're gone.",
-      ],
-      stages: [
-        { kind: 'goto', at: P.bank, name: 'THE VAULT', text: 'Hit Banco Alba' },
-        { kind: 'escape', at: P.pier, name: 'RUN THE HEAT', text: 'Escape the 4-star heat — reach Miramar Pier', timer: 360, require: 'reach' },
-      ],
-      reward: { money: 5000, respect: 25, rp: 600 },
-      heatOnStage: { 1: 4 },
-      finale: true,
-    },
-  ];
+  function showDialogue(lines) {
+    if (!state.flags) state.flags = {};
+    state.flags.dialogue = lines;
+    emit('dialogue:show', { lines });
+  }
 
-  const RACES = [
-    { id: 0, name: 'Sunset Sprint', start: { x: -240, z: 0 }, points: [{ x: 0, z: -240 }, { x: 240, z: 0 }, { x: 0, z: 240 }], timer: 150 },
-    { id: 1, name: 'Coast Road Dash', start: { x: 240, z: -240 }, points: [{ x: 240, z: 240 }, { x: -240, z: 240 }, { x: -240, z: -240 }], timer: 180 },
-    { id: 2, name: 'Maravilla Loop', start: { x: 0, z: 240 }, points: [{ x: -240, z: 0 }, { x: 0, z: -240 }, { x: 240, z: 0 }], timer: 180 },
-  ];
-
-  function startMission(i) {
-    if (i < 0 || i >= DEFS.length) return false;
-    if (state.mission) return false;
-    const def = DEFS[i];
-    const title = MISSION_NAMES[i];
-    state.mission = {
-      id: i, title, giver: def.giver, stage: 0,
-      objective: def.stages[0].text,
-      marker: { x: def.stages[0].at.x ?? def.stages[0].at[0].x, z: def.stages[0].at.z ?? def.stages[0].at[0].z },
-      timer: def.stages[0].timer || 0,
-      data: {},
-    };
-    state.missionStartTime = state.time;
-    setObjective(def.stages[0].text);
-    setMarker(state.mission.marker.x, state.mission.marker.z);
-    banner(title, `Mission ${i + 1} of 10`);
-    for (const line of def.briefing) say(line);
-    if (events) events.emit('mission', { stage: 'start', id: i, title });
+  function startMission(index) {
+    const i = index == null ? progress.index : index;
+    if (i < 0 || i >= MISSIONS.length) return false;
+    progress.index = i;
+    progress.stage = 0;
+    progress.started = true;
+    progress.actionCount = 0;
+    progress.holdTimer = 0;
+    progress.surviveTimer = 0;
+    progress.elapsed = 0;
+    progress.missionStartedAt = (state.stats && state.stats.timePlayed) || 0;
+    progress.stageStartedAt = progress.missionStartedAt;
+    const m = MISSIONS[i];
+    showDialogue(m.dialogue);
+    syncState();
+    emit('mission:started', { id: m.id, title: m.title, giver: m.giver });
+    emit('objective:update', { objective: state.missions.objective, pos: state.missions.objectivePos });
     return true;
   }
 
-  function nextMission() {
-    const i = state.nextMission;
-    if (i >= DEFS.length) return false;
-    return startMission(i);
+  function rateMission(m) {
+    // G: finished well inside par with no deaths. S: inside par. B: the rest.
+    const par = m.parSeconds || 600;
+    if (progress.deaths === 0 && progress.elapsed <= par * 0.8) return 'G';
+    if (progress.elapsed <= par) return 'S';
+    return 'B';
   }
 
-  function failMission(reason) {
-    const m = state.mission;
-    if (!m) return;
-    msg(`Mission failed: ${reason}. Head back to the marker to try again.`, 'bad');
-    if (events) events.emit('mission', { stage: 'failed', id: m.id, reason });
-    state.mission = null;
-    hideMarker();
-    setObjective('Go to the yellow marker to start the next mission.');
+  function applyReward(m) {
+    const r = m.reward;
+    if (state.player) {
+      state.player.money = (state.player.money || 0) + r.money;
+    }
+    if (state.stats) {
+      state.stats.rp = (state.stats.rp || 0) + r.rp;
+      state.stats.missionsDone = (state.stats.missionsDone || 0) + 1;
+      state.stats.moneyEarned = (state.stats.moneyEarned || 0) + r.money;
+      state.stats.respect = (state.stats.respect || 0) + 10;
+    }
+    if (state.districts && state.districts.standing && m.district) {
+      const cur = state.districts.standing[m.district] ?? 50;
+      state.districts.standing[m.district] = clampStanding(cur + (r.standing || 8));
+    }
+    if (state.missions) {
+      if (!Array.isArray(state.missions.done)) state.missions.done = [];
+      if (!state.missions.done.includes(m.id)) state.missions.done.push(m.id);
+      if (!state.missions.ratings) state.missions.ratings = {};
+      state.missions.ratings[m.id] = rateMission(m);
+    }
+    updateRank();
+  }
+
+  function updateRank() {
+    if (!state.stats) return;
+    const rp = state.stats.rp || 0;
+    const ranks = [
+      { at: 4500, name: 'LEYENDA' },
+      { at: 2400, name: 'SHOT CALLER' },
+      { at: 1200, name: 'FIXER' },
+      { at: 500, name: 'HUSTLER' },
+      { at: 0, name: 'ROOKIE' },
+    ];
+    for (const r of ranks) {
+      if (rp >= r.at) {
+        state.stats.rank = r.name;
+        return;
+      }
+    }
   }
 
   function completeMission() {
-    const m = state.mission;
-    if (!m) return;
-    const def = DEFS[m.id];
-    const rp = def.reward.rp ?? 250;
-    // Mission rating: gold/silver/bronze against the par time.
-    const elapsed = Math.max(0, state.time - (state.missionStartTime || state.time));
-    const rating = ratingForTime(elapsed, MISSION_PARS[m.id] || 180);
-    state.ratings[m.id] = rating;
-    p.money += def.reward.money;
-    p.respect += def.reward.respect;
-    p.rp += rp;
-    state.stats.moneyEarned += def.reward.money;
-    state.stats.missionsDone += 1;
-    state.missionsDone.push(m.id);
-    state.nextMission = m.id + 1;
-    if (def.reward.weapon && !p.weaponsOwned.includes(def.reward.weapon)) {
-      p.weaponsOwned.push(def.reward.weapon);
-      msg(`New weapon unlocked: the ${def.reward.weapon} is yours. Press Tab to see it.`, 'good');
+    const m = mission();
+    if (!m) return false;
+    applyReward(m);
+    progress.started = false;
+    const rating = (state.missions.ratings && state.missions.ratings[m.id]) || 'B';
+    emit('mission:complete', {
+      id: m.id,
+      title: m.title,
+      rating,
+      money: m.reward.money,
+      rp: m.reward.rp,
+    });
+    emit('message', { text: `Mission complete: ${m.title} — rating ${rating} (+$${m.reward.money}, +${m.reward.rp} RP)` });
+    progress.index = Math.min(progress.index + 1, MISSIONS.length - 1);
+    if (progress.index < MISSIONS.length && !state.missions.done.includes(MISSIONS[progress.index].id)) {
+      progress.stage = 0;
+      progress.started = false;
     }
-    if (def.reward.garage && !state.garage.includes(def.reward.garage)) {
-      state.garage.push(def.reward.garage);
-      msg(`New car in the garage! The ${def.reward.garage} is yours.`, 'good');
-    }
-    if (def.reward.ammo) {
-      p.ammo.smg = (p.ammo.smg || 0) + 90;
-      p.ammo.pistol = (p.ammo.pistol || 0) + 60;
-      msg('Marlon tossed you extra ammo. Nice.', 'good');
-    }
-    msg(`Mission complete: ${m.title} — $${def.reward.money}, +${def.reward.respect} respect, +${rp} RP. Rating: ${rating} (${Math.round(elapsed)}s vs par ${MISSION_PARS[m.id] || 180}s).`, 'good');
-    if (events) events.emit('mission', { stage: 'complete', id: m.id, title: m.title });
-    state.mission = null;
-    hideMarker();
-    if (def.finale) {
-      state.screen = 'complete';
-      if (typeof document !== 'undefined') {
-        const s = document.getElementById('end-screen');
-        const t = document.getElementById('end-title');
-        const tx = document.getElementById('end-text');
-        if (s) s.style.display = 'flex';
-        if (t) t.textContent = 'THE LAST SCORE';
-        if (tx) {
-          tx.textContent = `Maravilla is yours, Rook. Missions: ${state.stats.missionsDone}/10 · ` +
-            `Money earned: $${state.stats.moneyEarned} · Races won: ${state.stats.racesWon} · ` +
-            `Taxi fares: ${state.stats.taxiFares}`;
-        }
-      }
-      setObjective('Maravilla is yours.');
-      return;
-    }
-    setObjective('Go to the yellow marker to start the next mission.');
+    syncState();
+    return true;
   }
 
   function advanceStage() {
-    const m = state.mission;
-    const def = DEFS[m.id];
-    m.stage += 1;
-    if (m.stage >= def.stages.length) {
-      completeMission();
-      return;
+    const m = mission();
+    if (!m) return false;
+    progress.actionCount = 0;
+    progress.holdTimer = 0;
+    progress.surviveTimer = 0;
+    progress.stage += 1;
+    progress.stageStartedAt = (state.stats && state.stats.timePlayed) || 0;
+    if (progress.stage >= m.stages.length) {
+      return completeMission();
     }
-    const st = def.stages[m.stage];
-    m.objective = st.text;
-    m.timer = st.timer || 0;
-    m.data = {};
-    const at = Array.isArray(st.at) ? st.at[0] : st.at;
-    setMarker(at.x, at.z);
-    setObjective(st.text);
-    if (def.heatOnStage && def.heatOnStage[m.stage]) {
-      if (events) events.emit('crime', { type: 'heat', amount: def.heatOnStage[m.stage] });
-      else p.wanted = Math.max(p.wanted, def.heatOnStage[m.stage]);
-    }
-    msg(st.text, 'info');
+    syncState();
+    emit('mission:stage', { id: m.id, stage: progress.stage, name: stage().name });
+    emit('objective:update', { objective: state.missions.objective, pos: state.missions.objectivePos });
+    return true;
   }
 
-  // --- side activities -------------------------------------------------------
-  function startRace(race) {
-    state.race = {
-      id: race.id, name: race.name,
-      checkpoints: race.points.map((pt) => ({ x: pt.x, z: pt.z })),
-      current: 0, timer: race.timer, startedAt: state.time,
-    };
-    setObjective(`Race: ${race.name} — hit checkpoint 1 of ${race.points.length}`);
-    msg(`Race started: ${race.name}. Follow the flags!`, 'info');
-    if (events) events.emit('mission', { stage: 'race-start', id: race.id });
+  // Called by the game loop / playtest harness when the player does the
+  // stage action (E key near the target, shooting the right target, etc).
+  function doStageAction() {
+    const s = stage();
+    if (!s || !progress.started) return false;
+    if (s.action === 'clear') {
+      progress.actionCount += 1;
+      const need = s.count || 1;
+      emit('message', { text: `Rivals dealt with: ${progress.actionCount}/${need}` });
+      if (progress.actionCount >= need) return advanceStage();
+      return true;
+    }
+    if (s.action) return advanceStage();
+    return false;
   }
 
-  function updateRace(dt) {
-    const r = state.race;
-    if (!r) return;
-    r.timer -= dt;
-    const cp = r.checkpoints[r.current];
-    if (cp && dist(p.x, p.z, cp.x, cp.z) < CHECKPOINT_RADIUS) {
-      r.current += 1;
-      if (r.current >= r.checkpoints.length) {
-        p.money += 500;
-        p.respect += 5;
-        p.rp += 100;
-        state.stats.moneyEarned += 500;
-        state.stats.racesWon += 1;
-        msg(`You won the ${r.name}! +$500, +5 respect, +100 RP.`, 'good');
-        state.race = null;
-        setObjective(state.mission ? state.mission.objective : 'Go to the yellow marker to start the next mission.');
-        return;
-      }
-      setObjective(`Race: ${r.name} — hit checkpoint ${r.current + 1} of ${r.checkpoints.length}`);
-    }
-    if (r.timer <= 0) {
-      msg(`Race over — too slow on the ${r.name}.`, 'bad');
-      state.race = null;
-      setObjective(state.mission ? state.mission.objective : 'Go to the yellow marker to start the next mission.');
-    }
-  }
+  // Proximity + heat checks, called every tick with the player position.
+  function update(dt, playerPos) {
+    if (state.stats) progress.elapsed = ((state.stats.timePlayed || 0) - progress.missionStartedAt);
+    if (!progress.started || !playerPos) return;
+    const s = stage();
+    if (!s) return;
 
-  function updateTaxi(dt) {
-    // A fare appears while driving a taxi (defId 'taxi').
-    const veh = p.vehicleId !== null
-      ? state.vehicles.find((v) => v.id === p.vehicleId) : null;
-    const inTaxi = !!veh && veh.defId === 'taxi';
-    if (!inTaxi) {
-      if (state.taxi) {
-        state.taxi = null;
-        if (flagMesh) flagMesh.visible = false;
+    // Hold / survive stages tick down while the player stays in place.
+    if (s.action === 'crack' && s.holdSeconds) {
+      if (dist(playerPos, s.target) <= (s.radius || 10)) {
+        progress.holdTimer += dt;
+        if (progress.holdTimer >= s.holdSeconds) advanceStage();
+      } else {
+        progress.holdTimer = 0;
       }
       return;
     }
-    if (!state.taxi) {
-      // Spawn a passenger at a random sidewalk point.
-      let px = -150;
-      let pz = 150;
-      if (ctx.city && ctx.city.randomSidewalkPoint) {
-        const pt = ctx.city.randomSidewalkPoint(rand);
-        px = pt.x; pz = pt.z;
-      }
-      state.taxi = { stage: 'pickup', x: px, z: pz, timer: 120, fare: 0 };
-      setObjective('Taxi fare: pick up the passenger at the flag.');
-      msg('Taxi fare waiting — pick up the passenger.', 'info');
+    if (s.action === 'survive' && s.surviveSeconds) {
+      progress.surviveTimer += dt;
+      if (progress.surviveTimer >= s.surviveSeconds) advanceStage();
+      return;
     }
-    const t = state.taxi;
-    if (!t) return;
-    t.timer -= dt;
-    if (flagMesh) {
-      flagMesh.position.set(t.x, 0, t.z);
-      flagMesh.visible = true;
-    }
-    if (t.stage === 'pickup' && dist(p.x, p.z, t.x, t.z) < 5) {
-      let dx = 30;
-      let dz = 30;
-      if (ctx.city && ctx.city.randomRoadPoint) {
-        const pt = ctx.city.randomRoadPoint(rand);
-        dx = pt.x; dz = pt.z;
-      }
-      t.stage = 'dropoff';
-      t.x = dx; t.z = dz;
-      t.timer = 120;
-      t.fare = Math.round(25 + dist(p.x, p.z, dx, dz) * 0.4);
-      setObjective(`Taxi fare: drop the passenger off ($${t.fare}).`);
-      msg(`Passenger aboard. Destination pays $${t.fare} — hurry.`, 'info');
-    } else if (t.stage === 'dropoff' && dist(p.x, p.z, t.x, t.z) < 6) {
-      p.money += t.fare;
-      p.respect += 2;
-      p.rp += 25;
-      state.stats.moneyEarned += t.fare;
-      state.stats.taxiFares += 1;
-      msg(`Fare complete: +$${t.fare}, +2 respect, +25 RP.`, 'good');
-      state.taxi = null;
-      if (flagMesh) flagMesh.visible = false;
-      setObjective(state.mission ? state.mission.objective : 'Go to the yellow marker to start the next mission.');
-    } else if (t.timer <= 0) {
-      msg('The passenger gave up waiting. Fare lost.', 'bad');
-      state.taxi = null;
-      if (flagMesh) flagMesh.visible = false;
-    }
-  }
 
-  function update(dt) {
-    // Subtitle queue (DOM fallback when hud has no subtitle method).
-    if (subtitleQueue.length > 0) {
-      subtitleTimer -= dt;
-      if (subtitleTimer <= 0) {
-        const line = subtitleQueue.shift();
-        if (typeof document !== 'undefined') {
-          if (!subtitleEl) subtitleEl = document.getElementById('subtitle');
-          if (subtitleEl) {
-            subtitleEl.textContent = line;
-            subtitleEl.style.display = 'block';
-            subtitleTimer = 3.5;
-            setTimeout(() => {
-              if (subtitleEl && subtitleQueue.length === 0) subtitleEl.style.display = 'none';
-            }, 3500);
-          } else {
-            msg(line, 'info');
-          }
-        } else {
-          msg(line, 'info');
-        }
-      }
-    }
-    if (state.screen !== 'play') return;
-
-    // --- idle: show the start marker for the next mission.
-    if (!state.mission && state.nextMission < DEFS.length) {
-      const def = DEFS[state.nextMission];
-      const at = Array.isArray(def.stages[0].at) ? def.stages[0].at[0] : def.stages[0].at;
-      if (markerMesh && !markerMesh.visible) {
-        setMarker(at.x, at.z);
-        setObjective(`Go to the yellow marker — ${MISSION_NAMES[state.nextMission]}`);
-      }
-      // Mission 1 (and any next mission) starts by walking/driving in.
-      if (dist(p.x, p.z, at.x, at.z) < MARKER_RADIUS) {
-        startMission(state.nextMission);
+    // Escape stages only complete once the heat is actually gone.
+    if (s.needsClear) {
+      const wanted = (state.wanted && state.wanted.level) || 0;
+      if (wanted > 0) {
+        // Blocked: stay on this stage while any heat remains. Mission 8
+        // must sit here at wanted 3 until the player lays low.
+        if (s.blockedNote) state.missions.blockedNote = s.blockedNote;
         return;
       }
+      // Heat is gone — but the player still has to reach the target.
+      state.missions.blockedNote = null;
+      if (dist(playerPos, s.target) <= (s.radius || 12)) advanceStage();
+      return;
     }
 
-    // --- active mission stage machine.
-    if (state.mission) {
-      const m = state.mission;
-      const def = DEFS[m.id];
-      const st = def.stages[m.stage];
-      if (!st) { completeMission(); return; }
-      if (m.timer > 0) {
-        m.timer -= dt;
-        if (m.timer <= 0) {
-          failMission('time ran out');
-          return;
-        }
-      }
-      if (st.kind === 'goto' || st.kind === 'deliver') {
-        const at = st.at;
-        if (dist(p.x, p.z, at.x, at.z) < MARKER_RADIUS) advanceStage();
-      } else if (st.kind === 'checkpoints') {
-        const idx = m.data.cp || 0;
-        const cps = st.at;
-        if (idx < cps.length) {
-          setMarker(cps[idx].x, cps[idx].z);
-          if (dist(p.x, p.z, cps[idx].x, cps[idx].z) < CHECKPOINT_RADIUS) {
-            m.data.cp = idx + 1;
-            if (m.data.cp >= cps.length) advanceStage();
-            else msg(`Checkpoint ${m.data.cp + 1} of ${cps.length}.`, 'info');
-          }
-        }
-      } else if (st.kind === 'escape') {
-        const at = st.at;
-        if (dist(p.x, p.z, at.x, at.z) < MARKER_RADIUS) {
-          // 'lose' (mission 8): the heat must be gone first — arriving with
-          // cops on your tail does not count. 'reach' (the finale): getting
-          // to the pier with the heat on IS the escape.
-          if (st.require === 'lose' && p.wanted > 0) {
-            if (!m.data.warned) {
-              m.data.warned = true;
-              msg('Lose the cops first — get the heat to zero, then come back here.', 'bad');
-            }
-          } else {
-            advanceStage();
-          }
-        } else {
-          m.data.warned = false;
-        }
-      }
-      if (markerMesh && markerMesh.visible && markerMesh.userData.diamond) {
-        markerMesh.userData.diamond.rotation.y += dt * 1.5;
-        markerMesh.userData.diamond.position.y = 3.2 + Math.sin(state.time * 2) * 0.4;
-      }
+    if (s.needsCar && state.player && state.player.onFoot) return;
+    if (dist(playerPos, s.target) <= (s.radius || 12)) {
+      // Stages with an action wait for doStageAction(); plain travel
+      // stages complete on arrival.
+      if (s.action && s.action !== 'clear') return;
+      advanceStage();
     }
-
-    // --- races: start by driving into a race start flag.
-    if (!state.race) {
-      for (const race of RACES) {
-        if (dist(p.x, p.z, race.start.x, race.start.z) < 8 && !p.onFoot) {
-          startRace(race);
-          break;
-        }
-      }
-    } else {
-      updateRace(dt);
-      const r = state.race;
-      if (r && flagMesh) {
-        const cp = r.checkpoints[r.current];
-        if (cp) {
-          flagMesh.position.set(cp.x, 0, cp.z);
-          flagMesh.visible = true;
-        }
-      }
-    }
-
-    updateTaxi(dt);
   }
+
+  function currentObjective() {
+    const s = stage();
+    const m = mission();
+    if (!m) return { text: 'All missions complete — Maravilla is yours.', pos: null };
+    if (!s) return { text: m.title, pos: null };
+    return { text: s.objective, pos: { x: s.target.x, z: s.target.z }, stageName: s.name };
+  }
+
+  // --- Street races -------------------------------------------------------
+  function startRace(id) {
+    const def = RACES.find((r) => r.id === id) || RACES[0];
+    race.active = def;
+    race.checkpoint = 0;
+    race.timeLeft = def.timeLimit;
+    emit('race:started', { id: def.id, name: def.name, timeLimit: def.timeLimit });
+    emit('message', { text: `Race started: ${def.name} — ${def.checkpoints.length} checkpoints, ${def.timeLimit}s` });
+    return def;
+  }
+
+  function updateRace(dt, playerPos) {
+    if (!race.active || !playerPos) return;
+    race.timeLeft -= dt;
+    if (race.timeLeft <= 0) {
+      emit('race:failed', { id: race.active.id, name: race.active.name });
+      emit('message', { text: `Race failed: ${race.active.name} — out of time` });
+      race.active = null;
+      return;
+    }
+    const cp = race.active.checkpoints[race.checkpoint];
+    if (cp && dist(playerPos, cp) <= 16) {
+      race.checkpoint += 1;
+      emit('race:checkpoint', { index: race.checkpoint, total: race.active.checkpoints.length });
+      if (race.checkpoint >= race.active.checkpoints.length) {
+        const reward = race.active.reward;
+        if (state.player) state.player.money = (state.player.money || 0) + reward;
+        if (state.stats) state.stats.moneyEarned = (state.stats.moneyEarned || 0) + reward;
+        emit('race:won', { id: race.active.id, name: race.active.name, reward, timeLeft: race.timeLeft });
+        emit('message', { text: `Race won: ${race.active.name} (+$${reward})` });
+        race.active = null;
+      }
+    }
+  }
+
+  // --- Taxi fares ---------------------------------------------------------
+  function startTaxi(stopIndex) {
+    const stop = TAXI_STOPS[stopIndex == null ? 0 : stopIndex % TAXI_STOPS.length];
+    const distance = dist(stop.from, stop.to);
+    taxi.active = stop;
+    taxi.phase = 'pickup';
+    taxi.timeLeft = Math.max(120, Math.ceil(distance / 4));
+    taxi.fare = Math.round(40 + distance * 0.35);
+    emit('taxi:started', { fare: taxi.fare, timeLeft: taxi.timeLeft, from: stop.from, to: stop.to });
+    emit('message', { text: `Taxi fare: pick up the passenger at ${stop.from.label} ($${taxi.fare})` });
+    return taxi.active;
+  }
+
+  function updateTaxi(dt, playerPos) {
+    if (!taxi.active || !playerPos) return;
+    taxi.timeLeft -= dt;
+    if (taxi.timeLeft <= 0) {
+      emit('taxi:failed', { text: 'Fare expired — the passenger walked away' });
+      taxi.active = null;
+      taxi.phase = 'idle';
+      return;
+    }
+    if (taxi.phase === 'pickup' && dist(playerPos, taxi.active.from) <= 12) {
+      taxi.phase = 'dropoff';
+      taxi.timeLeft = Math.max(taxi.timeLeft, 90);
+      emit('taxi:picked-up', { to: taxi.active.to });
+      emit('message', { text: `Passenger aboard — drop them at ${taxi.active.to.label}` });
+      return;
+    }
+    if (taxi.phase === 'dropoff' && dist(playerPos, taxi.active.to) <= 12) {
+      if (state.player) state.player.money = (state.player.money || 0) + taxi.fare;
+      if (state.stats) state.stats.moneyEarned = (state.stats.moneyEarned || 0) + taxi.fare;
+      emit('taxi:done', { fare: taxi.fare });
+      emit('message', { text: `Fare complete (+$${taxi.fare})` });
+      taxi.active = null;
+      taxi.phase = 'idle';
+    }
+  }
+
+  function onPlayerDeath() {
+    progress.deaths += 1;
+  }
+
+  // Re-read the mission index/stage from state after a save is loaded:
+  // the module keeps its own progress counters, so a load would
+  // otherwise leave them pointing at the pre-load mission.
+  function syncFromState() {
+    const idx = (state.missions && state.missions.current) || 0;
+    progress.index = Math.max(0, Math.min(MISSIONS.length - 1, idx));
+    progress.stage = (state.missions && state.missions.stage) || 0;
+    progress.started = true;
+    progress.actionCount = 0;
+    progress.holdTimer = 0;
+    progress.surviveTimer = 0;
+    progress.missionStartedAt = (state.stats && state.stats.timePlayed) || 0;
+    progress.stageStartedAt = progress.missionStartedAt;
+    syncState();
+  }
+
+  syncState();
 
   return {
-    update,
+    MISSIONS,
+    RACES,
+    TAXI_STOPS,
+    PLACES,
     startMission,
-    nextMission,
-    get definitions() { return DEFS; },
-    get races() { return RACES; },
-    get acts() { return ACTS; },
-    get ratings() { return state.ratings; },
+    advanceStage,
+    completeMission,
+    doStageAction,
+    syncFromState,
+    currentObjective,
+    update,
+    startRace,
+    updateRace,
+    startTaxi,
+    updateTaxi,
+    onPlayerDeath,
+    get current() {
+      return mission();
+    },
+    get currentStage() {
+      return stage();
+    },
+    get progress() {
+      return progress;
+    },
+    get race() {
+      return race;
+    },
+    get taxi() {
+      return taxi;
+    },
   };
 }

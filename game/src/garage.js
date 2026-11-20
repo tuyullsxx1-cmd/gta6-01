@@ -1,186 +1,250 @@
-// Maravilla — Celia's Garage: upgrade and take out the cars you own.
-// G opens it while on foot near the garage. Engine +15% top speed per
-// level (max 3, $800), armour +50 max health per level (max 3, $600),
-// nitro — hold Shift while driving for a boost ($1000, one-time). Taking a
-// car out spawns it on the road by the garage. Communicates only via
-// state.* and events; never imports another system.
+// garage.js — Celia's Garage: engine, armour, and nitro upgrades for
+// every car Rook owns, plus taking a car out onto the street. The garage
+// only opens on foot while standing at the garage itself (key G). Upgrade
+// prices climb with the level already fitted, and loyal districts knock
+// 10% off the bill. Each upgrade changes how the car drives: engine adds
+// top speed, armour soaks damage, nitro unlocks the Shift boost.
 
-import { CITY, VEHICLES } from './config.js';
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
 
-const ENGINE_PRICE = 800;
-const ARMOUR_PRICE = 600;
-const NITRO_PRICE = 1000;
-const MAX_LEVEL = 3;
+function tierForStanding(value) {
+  if (value >= 75) return 'LOYAL';
+  if (value >= 50) return 'WARM';
+  if (value >= 25) return 'NEUTRAL';
+  if (value >= 0) return 'COLD';
+  return 'HOSTILE';
+}
 
-export function createGarage(ctx) {
-  const { state, events } = ctx;
-  const p = state.player;
-  let open = false;
-  let el = null;
-  let listEl = null;
+const TIER_PRICE = { LOYAL: 0.9, WARM: 0.95, NEUTRAL: 1.0, COLD: 1.05, HOSTILE: 1.15 };
 
-  function msg(text, kind = 'info') {
-    if (ctx.hud && ctx.hud.message) { ctx.hud.message(text, kind); return; }
-    if (state.messages) state.messages.push({ text, at: state.time, kind });
+// Price ladders: index = the level being bought (0 -> level 1, etc.).
+export const UPGRADE_PRICES = {
+  engine: [400, 800, 1400],
+  armour: [300, 600, 1000],
+  nitro: [700],
+};
+
+export const UPGRADE_MAX = { engine: 3, armour: 3, nitro: 1 };
+
+export const UPGRADE_NAMES = {
+  engine: 'Engine',
+  armour: 'Armour',
+  nitro: 'Nitro',
+};
+
+const GARAGE_SPOT = { x: 24, z: -160, radius: 14 };
+
+// Fallback garage position when the city module has not registered its
+// own spawn points yet. The city module may override via state.spawnPoints.
+function garagePosition(state) {
+  const spots = state.spawnPoints || state.spawns;
+  if (spots && spots.garage && typeof spots.garage.x === 'number') return spots.garage;
+  return GARAGE_SPOT;
+}
+
+function ensureGarage(state) {
+  if (!state.garage) state.garage = { upgrades: {}, ownedCars: [] };
+  if (!state.garage.upgrades || typeof state.garage.upgrades !== 'object') state.garage.upgrades = {};
+  if (!Array.isArray(state.garage.ownedCars)) state.garage.ownedCars = [];
+  return state.garage;
+}
+
+function ensureUpgrades(garage, carId) {
+  if (!garage.upgrades[carId]) garage.upgrades[carId] = { engine: 0, armour: 0, nitro: false };
+  const u = garage.upgrades[carId];
+  if (typeof u.engine !== 'number') u.engine = 0;
+  if (typeof u.armour !== 'number') u.armour = 0;
+  if (typeof u.nitro !== 'boolean') u.nitro = false;
+  return u;
+}
+
+export function createGarage(state, bus) {
+  const garage = ensureGarage(state);
+  let garageOpen = false;
+
+  function districtPriceMul() {
+    const d = state.districts;
+    const p = state.player || {};
+    const name =
+      (typeof p.district === 'string' && p.district) ||
+      (d && typeof d.current === 'string' ? d.current : null) ||
+      'Centro Alba';
+    const standing = d && d.standing && typeof d.standing[name] === 'number' ? d.standing[name] : 50;
+    return TIER_PRICE[tierForStanding(standing)];
   }
 
-  function upg(defId) {
-    if (!state.garageUpgrades[defId]) {
-      state.garageUpgrades[defId] = { engine: 0, armour: 0, nitro: false };
+  function priceFor(kind, level) {
+    const ladder = UPGRADE_PRICES[kind];
+    if (!ladder || level >= ladder.length) return null;
+    return Math.round(ladder[level] * districtPriceMul());
+  }
+
+  function isAtGarage() {
+    const p = state.player || {};
+    if (typeof p.x !== 'number' || typeof p.z !== 'number') return false;
+    const g = garagePosition(state);
+    const d = Math.sqrt((p.x - g.x) * (p.x - g.x) + (p.z - g.z) * (p.z - g.z));
+    return d <= (g.radius || GARAGE_SPOT.radius);
+  }
+
+  function canOpen() {
+    const p = state.player || {};
+    if (p.onFoot === false) return { ok: false, reason: 'Get out of the car first.' };
+    if (!isAtGarage()) return { ok: false, reason: 'You need to be at Celia’s Garage.' };
+    return { ok: true };
+  }
+
+  function open() {
+    const check = canOpen();
+    if (!check.ok) {
+      if (bus) bus.emit('message', { text: check.reason });
+      return check;
     }
-    return state.garageUpgrades[defId];
+    garageOpen = true;
+    if (state.flags) state.flags.garageOpen = true;
+    if (bus) bus.emit('garage-opened', { at: garagePosition(state) });
+    return { ok: true };
   }
 
-  function nearGarage() {
-    const g = CITY.places.garage;
-    return Math.hypot(p.x - g.x, p.z - g.z) < 10;
+  function close() {
+    garageOpen = false;
+    if (state.flags) state.flags.garageOpen = false;
+    if (bus) bus.emit('garage-closed', {});
   }
 
-  function build() {
-    if (el || typeof document === 'undefined') return;
-    el = document.createElement('div');
-    el.id = 'garage';
-    el.style.display = 'none';
-    el.innerHTML = '<div class="garage-title">CELIA’S GARAGE</div><div class="garage-list"></div>'
-      + '<div class="garage-hint">Click to buy or take out · G closes</div>';
-    listEl = el.querySelector('.garage-list');
-    document.body.appendChild(el);
+  function toggle() {
+    if (garageOpen) close();
+    else open();
+    return garageOpen;
   }
 
-  function refresh() {
-    if (!el || !listEl) return;
-    // District standing moves prices: loyal streets get a discount.
-    const mult = (state.standingFx && state.standingFx.priceMult) || 1;
-    const price = (b) => Math.round((b * mult) / 10) * 10;
-    listEl.innerHTML = '';
-    if (state.garage.length === 0) {
-      listEl.innerHTML = '<div class="garage-empty">No cars yet. Finish missions to earn them.</div>';
-      return;
+  function addOwnedCar(carId, name) {
+    if (!carId) return false;
+    const found = garage.ownedCars.find((c) => c.id === carId);
+    if (found) return false;
+    garage.ownedCars.push({ id: carId, name: name || carId });
+    ensureUpgrades(garage, carId);
+    if (bus) bus.emit('car-acquired', { id: carId, name: name || carId });
+    return true;
+  }
+
+  function buyUpgrade(carId, kind) {
+    if (!UPGRADE_PRICES[kind]) return { ok: false, reason: 'unknown upgrade' };
+    const upgrades = ensureUpgrades(garage, carId);
+    const currentLevel = kind === 'nitro' ? (upgrades.nitro ? 1 : 0) : upgrades[kind];
+    if (currentLevel >= UPGRADE_MAX[kind]) return { ok: false, reason: 'already maxed' };
+    const price = priceFor(kind, currentLevel);
+    const player = state.player || {};
+    const money = typeof player.money === 'number' ? player.money : 0;
+    if (money < price) return { ok: false, reason: 'not enough cash', price };
+    player.money = money - price;
+    if (kind === 'nitro') upgrades.nitro = true;
+    else upgrades[kind] = currentLevel + 1;
+    if (bus) {
+      bus.emit('garage-upgraded', { carId, kind, level: kind === 'nitro' ? 1 : upgrades[kind], price });
+      bus.emit('message', {
+        text:
+          UPGRADE_NAMES[kind] +
+          ' fitted to ' +
+          carId +
+          (kind === 'nitro' ? '' : ' (level ' + upgrades[kind] + ')') +
+          ' — $' +
+          price +
+          '.',
+      });
     }
-    state.garage.forEach((defId, idx) => {
-      const def = VEHICLES[defId];
-      if (!def) return;
-      const u = upg(defId);
-      const row = document.createElement('div');
-      row.className = 'garage-row';
-      const inWorld = state.vehicles.some((v) => v.defId === defId && v.kind !== 'cop');
-      row.innerHTML = `<b>${def.name}</b><span class="garage-sub">${def.kind} · top ${def.topSpeed} m/s</span>`;
-      const mkBtn = (label, disabled, fn) => {
-        const b = document.createElement('button');
-        b.className = 'garage-btn';
-        b.textContent = label;
-        b.disabled = !!disabled;
-        b.addEventListener('click', () => { fn(); refresh(); });
-        row.appendChild(b);
-        return b;
-      };
-      mkBtn(u.engine >= MAX_LEVEL ? `Engine MAX` : `Engine Lv ${u.engine + 1} — $${price(ENGINE_PRICE)}`,
-        u.engine >= MAX_LEVEL || p.money < price(ENGINE_PRICE), () => {
-          p.money -= price(ENGINE_PRICE);
-          u.engine += 1;
-          msg(`${def.name} engine upgraded to Lv ${u.engine} (+15% top speed).`, 'good');
-          if (events) events.emit('garage', { defId, upgrade: 'engine', level: u.engine });
-        });
-      mkBtn(u.armour >= MAX_LEVEL ? `Armour MAX` : `Armour Lv ${u.armour + 1} — $${price(ARMOUR_PRICE)}`,
-        u.armour >= MAX_LEVEL || p.money < price(ARMOUR_PRICE), () => {
-          p.money -= price(ARMOUR_PRICE);
-          u.armour += 1;
-          msg(`${def.name} armour upgraded to Lv ${u.armour} (+50 health).`, 'good');
-          if (events) events.emit('garage', { defId, upgrade: 'armour', level: u.armour });
-        });
-      mkBtn(u.nitro ? 'Nitro installed' : `Nitro — $${price(NITRO_PRICE)}`,
-        u.nitro || p.money < price(NITRO_PRICE), () => {
-          p.money -= price(NITRO_PRICE);
-          u.nitro = true;
-          msg(`${def.name} has nitro — hold Shift while driving.`, 'good');
-          if (events) events.emit('garage', { defId, upgrade: 'nitro' });
-        });
-      mkBtn(inWorld ? 'Already out' : 'Take out',
-        inWorld, () => {
-          if (ctx.vehicles && ctx.vehicles.spawnVehicle) {
-            ctx.vehicles.spawnVehicle(defId, -150, -60, Math.PI / 2, { kind: 'parked' });
-            msg(`The ${def.name} is waiting on the road by the garage.`, 'good');
-          } else {
-            msg('Garage is closed right now.', 'bad');
-          }
-        });
-      listEl.appendChild(row);
-    });
-    // --- For sale: anything with a price that you do not own yet. The
-    // Picuda 250 bike and the Tormenta S only ever come from here.
-    const forSale = Object.entries(VEHICLES)
-      .filter(([id, d]) => d.price > 0 && d.kind !== 'cop' && !state.garage.includes(id));
-    if (forSale.length > 0) {
-      const head = document.createElement('div');
-      head.className = 'garage-title';
-      head.style.fontSize = '15px';
-      head.textContent = 'FOR SALE';
-      listEl.appendChild(head);
-      for (const [defId, def] of forSale) {
-        const row = document.createElement('div');
-        row.className = 'garage-row';
-        row.innerHTML = `<b>${def.name}</b><span class="garage-sub">${def.kind} · top ${def.topSpeed} m/s · $${price(def.price).toLocaleString('en-US')}</span>`;
-        const b = document.createElement('button');
-        b.className = 'garage-btn';
-        b.textContent = `Buy — $${price(def.price).toLocaleString('en-US')}`;
-        b.disabled = p.money < price(def.price);
-        b.addEventListener('click', () => {
-          if (p.money < price(def.price)) return;
-          p.money -= price(def.price);
-          state.garage.push(defId);
-          msg(`You bought the ${def.name}. It's in the garage.`, 'good');
-          if (events) events.emit('garage', { defId, upgrade: 'bought' });
-          refresh();
-        });
-        row.appendChild(b);
-        listEl.appendChild(row);
-      }
+    return { ok: true, price, level: kind === 'nitro' ? 1 : upgrades[kind] };
+  }
+
+  // Effective stats for a car after upgrades. The driving module reads
+  // these instead of the base vehicle definition.
+  function getCarStats(carId) {
+    const u = ensureUpgrades(garage, carId);
+    return {
+      carId,
+      engine: u.engine,
+      armour: u.armour,
+      nitro: u.nitro,
+      topSpeedMul: 1 + u.engine * 0.12,
+      accelMul: 1 + u.engine * 0.1,
+      damageReduction: u.armour * 0.12,
+      nitroBoost: u.nitro ? 1.35 : 1,
+    };
+  }
+
+  function takeOut(carId) {
+    const owned = garage.ownedCars.find((c) => c.id === carId);
+    if (!owned) return { ok: false, reason: 'you do not own that car' };
+    const player = state.player || {};
+    if (player.onFoot === false && player.currentCar) {
+      return { ok: false, reason: 'you are already in a car' };
     }
-    const money = document.createElement('div');
-    money.className = 'garage-money';
-    money.textContent = `Cash: $${p.money}`;
-    listEl.appendChild(money);
-  }
-
-  function openGarage() {
-    if (state.screen !== 'play' || !p.onFoot) return;
-    if (!nearGarage()) {
-      msg('Get closer to Celia’s Garage to use it.', 'info');
-      return;
+    const stats = getCarStats(carId);
+    if (bus) {
+      bus.emit('car-taken-out', { carId, name: owned.name, stats });
+      bus.emit('message', { text: 'Took the ' + owned.name + ' out of the garage.' });
     }
-    build();
-    if (!el) return;
-    open = true;
-    el.style.display = 'block';
-    refresh();
+    return { ok: true, carId, name: owned.name, stats };
   }
 
-  function closeGarage() {
-    open = false;
-    if (el) el.style.display = 'none';
+  function panelData() {
+    return {
+      open: garageOpen,
+      atGarage: isAtGarage(),
+      cars: garage.ownedCars.map((c) => ({
+        id: c.id,
+        name: c.name,
+        upgrades: { ...ensureUpgrades(garage, c.id) },
+        stats: getCarStats(c.id),
+        prices: {
+          engine: priceFor('engine', ensureUpgrades(garage, c.id).engine),
+          armour: priceFor('armour', ensureUpgrades(garage, c.id).armour),
+          nitro: ensureUpgrades(garage, c.id).nitro ? null : priceFor('nitro', 0),
+        },
+      })),
+      priceMul: districtPriceMul(),
+    };
   }
 
-  if (typeof window !== 'undefined') {
-    window.addEventListener('keydown', (event) => {
-      if (event.repeat) return;
-      if (event.code === 'KeyG' && state.screen === 'play' && p.onFoot) {
-        if (open) closeGarage();
-        else openGarage();
-        return;
-      }
-      if (open && event.code === 'Escape') closeGarage();
-    });
-  }
-
-  function update(dt) {
-    if (open) refresh();
+  function handleKey(code) {
+    if (code === 'KeyG') {
+      toggle();
+      return true;
+    }
+    if (code === 'Escape' && open) {
+      close();
+      return true;
+    }
+    return false;
   }
 
   return {
-    update,
-    open: openGarage,
-    close: closeGarage,
-    nearGarage,
-    get isOpen() { return open; },
+    update() {
+      // The garage has no per-frame work; it reacts to keys and purchases.
+    },
+    open,
+    close,
+    toggle,
+    canOpen,
+    isOpen() {
+      return garageOpen;
+    },
+    isAtGarage,
+    garagePosition: () => garagePosition(state),
+    buyUpgrade,
+    priceFor,
+    getUpgrades(carId) {
+      return { ...ensureUpgrades(garage, carId) };
+    },
+    getCarStats,
+    addOwnedCar,
+    takeOut,
+    ownedCars() {
+      return garage.ownedCars.map((c) => ({ ...c }));
+    },
+    panelData,
+    handleKey,
   };
 }
