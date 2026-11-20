@@ -120,3 +120,4 @@ Four staged shots, each 1280×800, taken from the game itself
 2. `2-drive.jpg` — driving down Paseo del Mar, car big and centre-frame.
 3. `3-chase.jpg` — a three-star chase: patrol cars, a roadblock, dispatch live.
 4. `4-mission.jpg` — mission 1, FIRST KEYS, at the garage with the crew briefing.
+
