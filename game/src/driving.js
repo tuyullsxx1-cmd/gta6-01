@@ -1,198 +1,263 @@
-// Driving: arcade vehicle physics + enter/exit (including carjack).
-// Reads held keys with edge detection for E/H so it never fights main.js's
-// takeActions() consumption. Owns nothing in state except the player/vehicle
-// fields that already exist (player.onFoot/vehicleId/speed/heading, vehicle
-// x/z/heading/speed/steer/health, stats.carsStolen/pedsDown/distanceDriven).
+// driving.js — arcade driving physics, carjacking, enter/exit, speed and
+// damage on the HUD. Written from the prose spec.
+import { damageCar } from './vehicles.js';
 
-import { VEHICLES } from './config.js';
+const NO_INPUT = {
+  isDown: () => false,
+  pressed: () => false,
+};
+const NO_BUS = {
+  on: () => {},
+  emit: () => {},
+  off: () => {},
+};
 
-export function createDriving(ctx) {
-  const { state, city, events, input } = ctx;
-  let prevE = false;
-  let prevH = false;
-  let lastRamAt = -10;
+function clamp(v, a, b) {
+  return Math.min(b, Math.max(a, v));
+}
 
-  function nearestVehicle(maxDist) {
+function collideCircle(x, z, radius, colliders) {
+  // Push a circle out of building AABBs. Returns corrected {x, z, hit}.
+  let hit = false;
+  for (const c of colliders || []) {
+    const nx = clamp(x, c.x - c.hx, c.x + c.hx);
+    const nz = clamp(z, c.z - c.hz, c.z + c.hz);
+    const dx = x - nx;
+    const dz = z - nz;
+    const d2 = dx * dx + dz * dz;
+    if (d2 < radius * radius) {
+      hit = true;
+      if (d2 > 0.0001) {
+        const d = Math.sqrt(d2);
+        x = nx + (dx / d) * radius;
+        z = nz + (dz / d) * radius;
+      } else {
+        // Centre inside the box: push out along the smaller axis.
+        const px = c.hx + radius - Math.abs(x - c.x);
+        const pz = c.hz + radius - Math.abs(z - c.z);
+        if (px < pz) x += (x >= c.x ? px : -px);
+        else z += (z >= c.z ? pz : -pz);
+      }
+    }
+  }
+  return { x, z, hit };
+}
+
+export function createDriving(state, bus, input, world) {
+  const keys = input || NO_INPUT;
+  const events = bus || NO_BUS;
+  const city = (world && world.city) || null;
+  const cars = (world && world.cars) || [];
+  const colliders = (city && city.colliders) || [];
+
+  const drive = {
+    inCar: false,
+    car: null,
+    steer: 0,
+    nitroLeft: 0,
+  };
+
+  function playerPos() {
+    return state.player || { x: 0, z: 0, heading: 0 };
+  }
+
+  function nearestCar(maxDist) {
+    const p = playerPos();
     let best = null;
     let bestD = maxDist;
-    for (const v of state.vehicles) {
-      const d = Math.hypot(v.x - state.player.x, v.z - state.player.z);
-      if (d < bestD) { bestD = d; best = v; }
+    for (const car of cars) {
+      if (car.exploded) continue;
+      const dx = car.x - p.x;
+      const dz = car.z - p.z;
+      const d = Math.sqrt(dx * dx + dz * dz);
+      if (d < bestD) {
+        bestD = d;
+        best = car;
+      }
     }
     return best;
   }
 
-  function enterVehicle(vehicle) {
-    const v = vehicle || nearestVehicle(4);
-    if (!v) return false;
-    if (v.driver) {
-      // Carjack: the driver bails and flees on foot.
-      v.driver = false;
-      state.stats.carsStolen += 1;
-      events.emit('crime', { type: 'carjack', amount: 1 });
-      events.emit('message', { text: 'Carjacked! The driver ran off.', kind: 'bad' });
-    } else if (ctx.hud) {
-      ctx.hud.message(`Driving the ${(VEHICLES[v.defId] || {}).name || v.defId}.`, 'info');
-    }
-    state.player.vehicleId = v.id;
+  function enterCar(car) {
+    if (!car || car.exploded) return false;
+    drive.inCar = true;
+    drive.car = car;
+    drive.steer = 0;
+    drive.nitroLeft = 3; // seconds of nitro, refills when not used
+    // Once the player takes a car it leaves traffic for good: the traffic
+    // AI must not keep driving it (it would fight the player's input and
+    // drive staged shot cars away during settling).
+    car.playerDriven = true;
     state.player.onFoot = false;
-    state.player.hidden = 1; // player mesh hidden while driving
-    state.player.speed = v.speed;
-    state.player.heading = v.heading;
-    state.player.x = v.x;
-    state.player.z = v.z;
-    events.emit('vehicle-enter', { vehicle: v });
+    state.player.currentCar = car.id;
+    state.player.x = car.x;
+    state.player.z = car.z;
+    state.player.heading = car.heading;
+    events.emit('entered-car', { car });
     return true;
   }
 
-  function exitVehicle() {
-    const v = state.vehicles.find((x) => x.id === state.player.vehicleId);
-    if (!v) {
-      state.player.vehicleId = null;
-      state.player.onFoot = true;
-      state.player.hidden = 0;
-      return false;
-    }
-    // Step out on the driver's side.
-    const px = v.x + Math.cos(v.heading) * 2.6;
-    const pz = v.z - Math.sin(v.heading) * 2.6;
-    const fixed = city.collide(px, pz, 0.6);
-    state.player.x = fixed.x;
-    state.player.z = fixed.z;
-    state.player.heading = v.heading;
-    state.player.speed = 0;
-    v.speed = 0;
-    state.player.vehicleId = null;
+  function exitCar() {
+    const car = drive.car;
+    if (!car) return false;
+    // Step out to the driver's side.
+    const sideX = car.x + Math.cos(car.heading) * 2.2;
+    const sideZ = car.z - Math.sin(car.heading) * 2.2;
+    state.player.x = sideX;
+    state.player.z = sideZ;
+    state.player.heading = car.heading;
+    state.player.speedKmh = 0;
     state.player.onFoot = true;
-    state.player.hidden = 0;
-    events.emit('vehicle-exit', { vehicle: v });
+    state.player.currentCar = null;
+    car.speed = 0;
+    drive.inCar = false;
+    drive.car = null;
+    events.emit('exited-car', { car });
     return true;
+  }
+
+  function tryCarjack() {
+    const car = nearestCar(4.5);
+    if (!car) return false;
+    const wasParked = car.speed === 0;
+    const ok = enterCar(car);
+    if (ok) {
+      if (state.stats) state.stats.carsStolen = (state.stats.carsStolen || 0) + 1;
+      events.emit('carjacked', { car, wasParked });
+      // Taking a car that is not yours is a crime where you stand.
+      events.emit('crime', { type: 'carjacking', x: car.x, z: car.z });
+    }
+    return ok;
+  }
+
+  function damageRide(amount) {
+    const car = drive.car;
+    if (!car) return;
+    damageCar(car, amount, { scene: world && world.scene, bus: events, cars });
+    events.emit('ride-damaged', { car, damage: car.damage });
   }
 
   function update(dt) {
-    // Enter/exit on the rising edge of E; horn on the rising edge of H.
-    const eHeld = input.held('KeyE');
-    if (eHeld && !prevE && state.screen === 'play') {
-      if (state.player.onFoot) enterVehicle(null);
-      else exitVehicle();
-    }
-    prevE = eHeld;
-    const hHeld = input.held('KeyH');
-    if (hHeld && !prevH && ctx.audio) ctx.audio.horn();
-    prevH = hHeld;
-    // NOTE: never call input.takeActions() here — main.js owns the one-shot
-    // action flags (Enter to start, P to pause); draining them here would
-    // steal CONFIRM/PAUSE from the loop.
-
-    const v = state.player.vehicleId !== null
-      ? state.vehicles.find((x) => x.id === state.player.vehicleId)
-      : null;
-    if (!v) {
-      if (ctx.audio) ctx.audio.engine(false, 0);
+    const p = playerPos();
+    if (!drive.inCar || !drive.car) {
+      // On foot: E near a car takes it — unless a dialogue box is up,
+      // in which case E advances the dialogue instead.
+      if (keys.pressed && keys.pressed('KeyE')) {
+        if (state.flags && state.flags.dialogue) return;
+        tryCarjack();
+      }
       return;
     }
-    const def = VEHICLES[v.defId] || VEHICLES.vagabundo;
-    // Garage upgrades: engine +15% top speed per level, nitro (Shift) +60%
-    // accel and +25% top speed while held.
-    const upg = (state.garageUpgrades && state.garageUpgrades[v.defId]) || {};
-    const boosting = !!upg.nitro && input.held('ShiftLeft');
-    const top = def.topSpeed * (1 + 0.15 * (upg.engine || 0)) * (boosting ? 1.25 : 1);
-    const throttle = input.moveAxis(); // W +1, S -1
-    const steerInput = input.strafeAxis(); // D +1, A -1
-    const handbrake = input.held('Space');
+    const car = drive.car;
+    const def = car.def;
+    const upgrades = (state.garage && state.garage.upgrades && state.garage.upgrades[car.id]) || {};
+    const engineLvl = upgrades.engine || 0;
+    const hasNitro = upgrades.nitro === true;
 
-    if (throttle > 0) {
-      v.speed += def.accel * (boosting ? 1.6 : 1) * throttle * dt;
-    } else if (throttle < 0) {
-      if (v.speed > 0.5) v.speed += def.brake * throttle * dt; // brake
-      else v.speed += def.accel * 0.6 * throttle * dt; // reverse
+    // E exits the car — unless a dialogue box is up, in which case E
+    // advances the dialogue instead.
+    if (keys.pressed && keys.pressed('KeyE')) {
+      if (state.flags && state.flags.dialogue) return;
+      exitCar();
+      return;
     }
-    // Rolling drag.
-    v.speed -= v.speed * 0.22 * dt;
+
+    const topSpeed = (def.topSpeed / 3.6) * (1 + engineLvl * 0.12);
+    const accel = def.accel * (1 + engineLvl * 0.1);
+    const forward = keys.isDown('KeyW') || keys.isDown('ArrowUp');
+    const back = keys.isDown('KeyS') || keys.isDown('ArrowDown');
+    const left = keys.isDown('KeyA') || keys.isDown('ArrowLeft');
+    const right = keys.isDown('KeyD') || keys.isDown('ArrowRight');
+    const handbrake = keys.isDown('Space');
+    const wantNitro = hasNitro && keys.isDown('ShiftLeft') && forward;
+
+    // Nitro: short burst from a 3-second reserve that refills slowly.
+    if (wantNitro && drive.nitroLeft > 0) {
+      drive.nitroLeft = Math.max(0, drive.nitroLeft - dt);
+    } else {
+      drive.nitroLeft = Math.min(3, drive.nitroLeft + dt * 0.4);
+    }
+    const nitroBoost = wantNitro && drive.nitroLeft > 0 ? 1.45 : 1;
+
+    // Longitudinal physics: accelerate, brake, reverse, drag.
+    if (forward) {
+      car.speed += accel * nitroBoost * dt;
+    } else if (back) {
+      if (car.speed > 0.5) car.speed -= accel * 1.6 * dt; // brake
+      else car.speed -= accel * 0.55 * dt; // reverse
+    } else {
+      car.speed -= car.speed * 0.6 * dt; // coast drag
+    }
     if (handbrake) {
-      const cut = Math.min(Math.abs(v.speed), 30 * dt);
-      v.speed -= Math.sign(v.speed) * cut;
+      car.speed -= car.speed * 3.2 * dt;
     }
-    // Speed cap: forward topSpeed, reverse ~40%.
-    v.speed = Math.max(-top * 0.4, Math.min(top, v.speed));
-    if (Math.abs(v.speed) < 0.05 && throttle === 0) v.speed = 0;
+    const maxReverse = topSpeed * 0.35;
+    car.speed = clamp(car.speed, -maxReverse, topSpeed * nitroBoost);
 
-    // Steering: scaled by speed, sharper with the handbrake, inverted in reverse.
-    v.steer += (steerInput - v.steer) * Math.min(1, dt * 8);
-    const steerAuthority = Math.min(1, Math.abs(v.speed) / 8);
-    const turnRate = v.steer * def.grip * 0.3 * steerAuthority * (handbrake ? 1.8 : 1);
-    v.heading += turnRate * dt * Math.sign(v.speed || 1);
-    // Bikes lean into the turn (visual only; the mesh sync keeps rotation.y).
-    if (def.kind === 'bike' && v.mesh) {
-      v.mesh.rotation.z = -v.steer * 0.28 * steerAuthority;
-    }
+    // Steering: less turn at speed, sharper with the handbrake.
+    const speedFrac = clamp(Math.abs(car.speed) / topSpeed, 0, 1);
+    const steerTarget = (left ? 1 : 0) - (right ? 1 : 0);
+    drive.steer += (steerTarget - drive.steer) * Math.min(1, 8 * dt);
+    const turnRate = (handbrake ? 2.4 : 1.5) * def.handling * (1 - speedFrac * 0.55);
+    const dirSign = car.speed >= 0 ? 1 : -1;
+    car.heading += drive.steer * turnRate * dirSign * Math.min(1, Math.abs(car.speed) / 6 + 0.15) * dt;
 
-    // Move + building collision (slide: keep the corrected position, lose speed).
-    const nx = v.x + Math.sin(v.heading) * v.speed * dt;
-    const nz = v.z + Math.cos(v.heading) * v.speed * dt;
-    const fixed = city.collide(nx, nz, 1.7);
-    const hit = Math.hypot(fixed.x - nx, fixed.z - nz) > 0.01;
-    v.x = Math.max(-295, Math.min(295, fixed.x));
-    v.z = Math.max(-295, Math.min(295, fixed.z));
-    if (hit) {
-      const impact = Math.abs(v.speed);
-      v.speed *= 0.45;
-      if (impact > 12) {
-        if (ctx.vehicles && ctx.vehicles.damageVehicle) ctx.vehicles.damageVehicle(v.id, 8);
-        else v.health = Math.max(0, v.health - 8);
-        events.emit('message', { text: 'Crash!', kind: 'bad' });
-      }
+    // Integrate and collide with buildings.
+    const prevX = car.x;
+    const prevZ = car.z;
+    const nx = car.x + Math.sin(car.heading) * car.speed * dt;
+    const nz = car.z + Math.cos(car.heading) * car.speed * dt;
+    const fixed = collideCircle(nx, nz, 1.6, colliders);
+    const impact = Math.abs(car.speed);
+    car.x = clamp(fixed.x, -292, 292);
+    car.z = clamp(fixed.z, -292, 292);
+    if (fixed.hit && impact > 6) {
+      // A hard hit damages the ride; faster hits hurt more.
+      const dmg = Math.min(24, (impact - 6) * 0.9);
+      damageCar(car, dmg, { scene: world && world.scene, bus: events, cars });
+      events.emit('crash', { car, damage: car.damage, speed: impact });
+      car.speed *= 0.35;
+    } else if (fixed.hit) {
+      car.speed *= 0.7;
     }
-
-    // Bump traffic cars (slow down, nudge them aside).
-    for (const o of state.vehicles) {
-      if (o === v) continue;
-      const d = Math.hypot(o.x - v.x, o.z - v.z);
-      if (d < 3.4 && d > 0.01) {
-        v.speed *= 0.7;
-        const push = (3.4 - d) * 0.5;
-        o.x += ((o.x - v.x) / d) * push;
-        o.z += ((o.z - v.z) / d) * push;
-        // A patrol car ramming you damages your car (and itself, a little).
-        // Gated to one hit per 0.6 s so a long shove is not a death sentence.
-        if (o.defId === 'patrulla' && state.time - lastRamAt > 0.6) {
-          const impact = Math.abs(v.speed) + Math.abs(o.speed || 0);
-          if (impact > 8) {
-            lastRamAt = state.time;
-            if (ctx.vehicles && ctx.vehicles.damageVehicle) {
-              ctx.vehicles.damageVehicle(v.id, 8);
-              ctx.vehicles.damageVehicle(o.id, 4);
-            } else {
-              v.health = Math.max(0, v.health - 8);
-            }
-            events.emit('message', { text: 'The patrol car rammed you!', kind: 'bad' });
-          }
-        }
-      }
-    }
-    // Hit a pedestrian: knock them down (never a graphic kill) + wanted.
-    if (Math.abs(v.speed) > 3) {
-      for (const ped of state.peds) {
-        if (ped.state === 'down') continue;
-        const d = Math.hypot(ped.x - v.x, ped.z - v.z);
-        if (d < 2.2) {
-          ped.state = 'down';
-          ped._downT = 4;
-          state.stats.pedsDown += 1;
-          events.emit('crime', { type: 'ped-hit', amount: 1 });
-          events.emit('message', { text: 'You hit a pedestrian!', kind: 'bad' });
-        }
-      }
+    if ((prevX !== car.x || prevZ !== car.z) && state.stats) {
+      state.stats.distanceDriven = (state.stats.distanceDriven || 0) +
+        Math.sqrt((car.x - prevX) ** 2 + (car.z - prevZ) ** 2);
     }
 
-    // Sync the player onto the car; HUD reads player.speed.
-    state.player.x = v.x;
-    state.player.z = v.z;
-    state.player.heading = v.heading;
-    state.player.speed = v.speed;
-    state.stats.distanceDriven += Math.abs(v.speed) * dt;
-    if (ctx.audio) ctx.audio.engine(true, Math.abs(v.speed) / top);
+    // Horn.
+    if (keys.pressed && keys.pressed('KeyH')) {
+      events.emit('honk', { x: car.x, z: car.z });
+    }
+
+    // Sync the car mesh and the player state to the HUD.
+    car.group.position.set(car.x, 0, car.z);
+    car.group.rotation.y = car.heading;
+    p.x = car.x;
+    p.z = car.z;
+    p.heading = car.heading;
+    p.speedKmh = Math.round(Math.abs(car.speed) * 3.6);
+    state.player.damage = Math.round(car.damage);
   }
 
-  return { update, enterVehicle, exitVehicle, nearestVehicle };
+  return {
+    drive,
+    update,
+    enterCar,
+    exitCar,
+    tryCarjack,
+    nearestCar,
+    damageRide,
+    // Drop the driving state without moving the player (used after a
+    // save is loaded, where the saved ride no longer exists). The dropped
+    // car returns to traffic.
+    reset() {
+      if (drive.car) drive.car.playerDriven = false;
+      drive.inCar = false;
+      drive.car = null;
+      drive.steer = 0;
+    },
+    isInCar: () => drive.inCar,
+    currentCar: () => drive.car,
+  };
 }

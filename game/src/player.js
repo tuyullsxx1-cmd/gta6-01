@@ -1,213 +1,269 @@
-// Maravilla — on-foot player: movement, jumping, health regen, WASTED.
-// Owns the player mesh (a bright-jacket low-poly figure) and respawning.
-// Communicates only via state.* and events; never imports another system.
-
+// player.js — on-foot movement, health, respawn at the hospital, and
+// health-pack / ammo-box pickups. Written from the prose spec.
 import * as THREE from 'three';
-import { PLAYER, CITY } from './config.js';
 
-const BOUND = 295;
+const NO_INPUT = {
+  isDown: () => false,
+  pressed: () => false,
+};
+const NO_BUS = {
+  on: () => {},
+  emit: () => {},
+  off: () => {},
+};
 
-function showEndScreen(title, text) {
-  if (typeof document === 'undefined') return;
-  const screen = document.getElementById('end-screen');
-  const t = document.getElementById('end-title');
-  const tx = document.getElementById('end-text');
-  if (screen) screen.style.display = 'flex';
-  if (t) t.textContent = title;
-  if (tx) tx.textContent = text;
+function clamp(v, a, b) {
+  return Math.min(b, Math.max(a, v));
 }
 
-export function createPlayer(ctx) {
-  const { state, scene, input, events, city, rng } = ctx;
-  const p = state.player;
-  const THREE_ = ctx.THREE || THREE;
+function makePlayerMesh() {
+  const g = new THREE.Group();
+  g.name = 'player';
+  const jacket = new THREE.MeshLambertMaterial({ color: 0xc0392b });
+  const skin = new THREE.MeshLambertMaterial({ color: 0xe8b88a });
+  const pants = new THREE.MeshLambertMaterial({ color: 0x2c3e50 });
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.85, 0.36), jacket);
+  torso.position.y = 1.15;
+  torso.castShadow = true;
+  g.add(torso);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 12, 10), skin);
+  head.position.y = 1.78;
+  head.castShadow = true;
+  g.add(head);
+  const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.26, 0.1, 12), jacket);
+  cap.position.y = 1.95;
+  g.add(cap);
+  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.72, 0.2), pants);
+  legL.position.set(-0.17, 0.36, 0);
+  g.add(legL);
+  const legR = legL.clone();
+  legR.position.x = 0.17;
+  g.add(legR);
+  const armL = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.62, 0.16), jacket);
+  armL.position.set(-0.42, 1.15, 0);
+  g.add(armL);
+  const armR = armL.clone();
+  armR.position.x = 0.42;
+  g.add(armR);
+  g.userData.legL = legL;
+  g.userData.legR = legR;
+  g.userData.armL = armL;
+  g.userData.armR = armR;
+  return g;
+}
 
-  let mesh = null;
-  let vy = 0;
-  let grounded = true;
-  let lastHurtAt = -100;
-  let lastHealth = p.health;
-  let endBound = false;
+export function createPlayer(state, bus, input, world) {
+  const keys = input || NO_INPUT;
+  const events = bus || NO_BUS;
+  const scene = (world && world.scene) || null;
+  const city = (world && world.city) || null;
+  const colliders = (city && city.colliders) || [];
+  const hospital = (city && city.spawnPoints && city.spawnPoints.hospital) ||
+    { x: 200, z: 200, heading: Math.PI };
 
-  // --- mesh: capsule body in a bright jacket, head, cap — visible at a glance.
-  if (scene) {
-    const g = new THREE_.Group();
-    const jacket = new THREE_.MeshLambertMaterial({ color: 0xff7a1a });
-    const skin = new THREE_.MeshLambertMaterial({ color: 0xc98d64 });
-    const denim = new THREE_.MeshLambertMaterial({ color: 0x2e4a6b });
-    const body = new THREE_.Mesh(new THREE_.CapsuleGeometry(0.42, 0.7, 4, 10), jacket);
-    body.position.y = 1.05;
-    body.castShadow = true;
-    g.add(body);
-    const head = new THREE_.Mesh(new THREE_.SphereGeometry(0.3, 12, 10), skin);
-    head.position.y = 1.95;
-    head.castShadow = true;
-    g.add(head);
-    const cap = new THREE_.Mesh(new THREE_.CylinderGeometry(0.32, 0.34, 0.12, 12),
-      new THREE_.MeshLambertMaterial({ color: 0x1c2733 }));
-    cap.position.y = 2.18;
-    g.add(cap);
-    const brim = new THREE_.Mesh(new THREE_.BoxGeometry(0.4, 0.05, 0.3),
-      new THREE_.MeshLambertMaterial({ color: 0x1c2733 }));
-    brim.position.set(0, 2.14, 0.32);
-    g.add(brim);
-    const legL = new THREE_.Mesh(new THREE_.CapsuleGeometry(0.16, 0.5, 4, 8), denim);
-    legL.position.set(-0.2, 0.45, 0);
-    g.add(legL);
-    const legR = legL.clone();
-    legR.position.x = 0.2;
-    g.add(legR);
-    g.position.set(p.x, 0, p.z);
-    scene.add(g);
-    mesh = g;
+  const p = state.player || {};
+  if (p.health == null) p.health = 100;
+  if (p.armour == null) p.armour = 25;
+  if (p.money == null) p.money = 250;
+  if (p.onFoot == null) p.onFoot = true;
+
+  const mesh = makePlayerMesh();
+  if (scene) scene.add(mesh);
+  mesh.position.set(p.x || 0, 0, p.z || 0);
+
+  const body = {
+    vy: 0, // vertical velocity for jumping
+    grounded: true,
+    bob: 0,
+    dead: false,
+    respawnTimer: 0,
+    jumpFrom: null, // takeoff point of the current jump, for longest-jump
+  };
+
+  function cameraYaw() {
+    if (world && typeof world.getCameraYaw === 'function') return world.getCameraYaw();
+    return p.heading || 0;
   }
 
-  function respawn(place, fee, title) {
-    p.health = PLAYER.health;
-    p.armour = 0;
-    p.wanted = 0;
-    p.dead = false;
-    p.busted = false;
-    p.vehicleId = null;
-    p.onFoot = true;
-    p.x = place.x;
-    p.z = place.z;
-    p.y = 0;
-    vy = 0;
-    if (fee > 0) p.money = Math.max(0, p.money - fee);
-    state.screen = 'play';
-    if (typeof document !== 'undefined') {
-      const s = document.getElementById('end-screen');
-      if (s) s.style.display = 'none';
+  function pushOutOfBuildings(x, z) {
+    for (const c of colliders) {
+      const nx = clamp(x, c.x - c.hx, c.x + c.hx);
+      const nz = clamp(z, c.z - c.hz, c.z + c.hz);
+      const dx = x - nx;
+      const dz = z - nz;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < 0.6 * 0.6) {
+        if (d2 > 0.0001) {
+          const d = Math.sqrt(d2);
+          x = nx + (dx / d) * 0.6;
+          z = nz + (dz / d) * 0.6;
+        } else {
+          x += 0.8;
+        }
+      }
     }
-    if (events) events.emit('message', { text: `${title} — back on your feet, Rook.`, kind: 'info' });
-    if (state.messages) state.messages.push({ text: `${title} — back on your feet, Rook.`, at: state.time, kind: 'info' });
+    return { x, z };
   }
 
-  function wasted() {
-    if (state.screen !== 'play') return;
-    p.dead = true;
-    p.health = 0;
-    state.screen = 'wasted';
-    if (events) events.emit('player-down', { kind: 'wasted' });
-    const fee = 200;
-    const stats = state.stats;
-    showEndScreen('WASTED', `The bay got the better of you. Hospital fee: $${fee}. ` +
-      `Missions done: ${stats.missionsDone} · Money earned: $${stats.moneyEarned} · Cars stolen: ${stats.carsStolen}`);
-    if (ctx.hud && ctx.hud.banner) ctx.hud.banner('WASTED', 'Clinica Sol patched you up.');
-    // Respawn happens on Enter (bound below) or via respawnWasted().
-    p._respawnPending = 'wasted';
+  function takeDamage(amount, source) {
+    if (body.dead || amount <= 0) return;
+    let left = amount;
+    // Armour soaks damage first.
+    if (p.armour > 0) {
+      const soaked = Math.min(p.armour, left);
+      p.armour -= soaked;
+      left -= soaked;
+    }
+    p.health = Math.max(0, p.health - left);
+    events.emit('health-changed', { health: p.health, armour: p.armour, source });
+    if (p.health <= 0) {
+      die(source);
+    }
   }
 
-  function respawnWasted() {
-    respawn(CITY.places.hospital, 200, 'WASTED');
+  function heal(amount) {
+    if (body.dead) return;
+    p.health = Math.min(100, p.health + amount);
+    events.emit('health-changed', { health: p.health, armour: p.armour, source: 'heal' });
   }
 
-  // Enter restarts after WASTED/BUSTED even though main.js only steps systems
-  // while screen === 'play', so this listener lives outside the loop.
-  if (typeof window !== 'undefined' && !endBound) {
-    endBound = true;
-    window.addEventListener('keydown', (event) => {
-      if (event.code !== 'Enter' && event.code !== 'Space') return;
-      if (state.screen === 'wasted') respawnWasted();
-      else if (state.screen === 'busted' && p._respawnPending === 'busted') {
-        respawn(CITY.places.policeHq, 300, 'BUSTED');
+  function die(source) {
+    if (body.dead) return;
+    body.dead = true;
+    body.respawnTimer = 2.5;
+    events.emit('player-died', { source, x: p.x, z: p.z });
+  }
+
+  function respawn() {
+    // Back on your feet at the hospital. You keep your money, minus a
+    // small hospital bill.
+    const bill = Math.min(100, Math.floor((p.money || 0) * 0.1));
+    p.money = Math.max(0, (p.money || 0) - bill);
+    p.health = 100;
+    p.armour = 25;
+    p.x = hospital.x;
+    p.z = hospital.z;
+    p.heading = hospital.heading || 0;
+    p.speedKmh = 0;
+    p.onFoot = true;
+    p.currentCar = null;
+    body.dead = false;
+    body.vy = 0;
+    body.grounded = true;
+    mesh.position.set(p.x, 0, p.z);
+    mesh.rotation.y = p.heading;
+    events.emit('player-respawned', { x: p.x, z: p.z, bill });
+  }
+
+  function collectPickups() {
+    const pickups = (world && world.pickups) || [];
+    for (const pk of pickups) {
+      if (pk.taken) continue;
+      const dx = pk.x - p.x;
+      const dz = pk.z - p.z;
+      if (dx * dx + dz * dz < 2.2 * 2.2) {
+        pk.taken = true;
+        if (pk.mesh && pk.mesh.parent) pk.mesh.parent.remove(pk.mesh);
+        if (pk.kind === 'health') {
+          heal(pk.amount || 40);
+          events.emit('pickup', { kind: 'health', amount: pk.amount || 40 });
+        } else if (pk.kind === 'ammo') {
+          events.emit('ammo-picked', { amount: pk.amount || 60, weapon: pk.weapon || null });
+          events.emit('pickup', { kind: 'ammo', amount: pk.amount || 60 });
+        }
       }
-    });
-  }
-
-  // Track damage taken from any source (cops, falls) for the regen delay.
-  if (events) {
-    events.on('damage', (d) => {
-      if (!d || d.target !== 'player') return;
-      lastHurtAt = state.time;
-      const amount = d.amount || 0;
-      if (p.armour > 0) {
-        const absorbed = Math.min(p.armour, amount);
-        p.armour -= absorbed;
-        p.health -= (amount - absorbed);
-      } else {
-        p.health -= amount;
-      }
-      p.health = Math.max(0, p.health);
-    });
+    }
   }
 
   function update(dt) {
-    // Keep the mesh in sync even when not on foot (hidden while driving).
-    if (mesh) {
-      mesh.visible = p.onFoot && state.screen !== 'title';
-      mesh.position.set(p.x, p.y, p.z);
-      mesh.rotation.y = p.heading;
-    }
-    if (state.screen !== 'play' || !p.onFoot) return;
-
-    // Damage taken directly to state (e.g. tests, other systems) still counts.
-    if (p.health < lastHealth) lastHurtAt = state.time;
-    lastHealth = p.health;
-
-    if (p.health <= 0) {
-      wasted();
+    if (body.dead) {
+      body.respawnTimer -= dt;
+      mesh.rotation.x = Math.min(Math.PI / 2, mesh.rotation.x + dt * 2);
+      if (body.respawnTimer <= 0) {
+        mesh.rotation.x = 0;
+        respawn();
+      }
       return;
     }
+    if (!p.onFoot) {
+      // Driving: keep the on-foot mesh parked out of sight.
+      mesh.visible = false;
+      return;
+    }
+    mesh.visible = true;
 
-    // --- movement, relative to the camera yaw (same convention as roam()).
-    const yaw = state.camera ? state.camera.yaw : 0;
-    const fwd = input ? input.moveAxis() : 0;
-    const str = input ? input.strafeAxis() : 0;
-    const run = input ? input.running() : false;
-    const speed = run ? PLAYER.runSpeed : PLAYER.walkSpeed;
-    const mx = Math.sin(yaw) * fwd + Math.cos(yaw) * str;
-    const mz = Math.cos(yaw) * fwd - Math.sin(yaw) * str;
-    const len = Math.hypot(mx, mz);
-    if (len > 0.001) {
-      const nx = (mx / len) * speed * dt;
-      const nz = (mz / len) * speed * dt;
-      // Slide along walls: try x and z separately through city.collide().
-      let next = { x: p.x + nx, z: p.z };
-      if (city && city.collide) next = city.collide(next.x, next.z, PLAYER.radius);
-      else next.x = Math.max(-BOUND, Math.min(BOUND, next.x));
-      p.x = next.x;
-      next = { x: p.x, z: p.z + nz };
-      if (city && city.collide) next = city.collide(next.x, next.z, PLAYER.radius);
-      else next.z = Math.max(-BOUND, Math.min(BOUND, next.z));
-      p.z = next.z;
+    // WASD moves relative to the camera yaw; Shift runs, Space jumps.
+    const yaw = cameraYaw();
+    let mx = 0;
+    let mz = 0;
+    if (keys.isDown('KeyW') || keys.isDown('ArrowUp')) { mx += Math.sin(yaw); mz += Math.cos(yaw); }
+    if (keys.isDown('KeyS') || keys.isDown('ArrowDown')) { mx -= Math.sin(yaw); mz -= Math.cos(yaw); }
+    if (keys.isDown('KeyA') || keys.isDown('ArrowLeft')) { mx -= Math.cos(yaw); mz += Math.sin(yaw); }
+    if (keys.isDown('KeyD') || keys.isDown('ArrowRight')) { mx += Math.cos(yaw); mz -= Math.sin(yaw); }
+    const moving = mx !== 0 || mz !== 0;
+    if (moving) {
+      const len = Math.sqrt(mx * mx + mz * mz);
+      mx /= len;
+      mz /= len;
       p.heading = Math.atan2(mx, mz);
-      p.speed = speed;
-      p.running = run;
-    } else {
-      p.speed = 0;
-      p.running = false;
     }
-    p.x = Math.max(-BOUND, Math.min(BOUND, p.x));
-    p.z = Math.max(-BOUND, Math.min(BOUND, p.z));
+    const running = keys.isDown('ShiftLeft') || keys.isDown('ShiftRight');
+    const speed = running ? 6.2 : 3.4;
+    let nx = p.x + mx * speed * dt;
+    let nz = p.z + mz * speed * dt;
+    const fixed = pushOutOfBuildings(nx, nz);
+    nx = clamp(fixed.x, -295, 295);
+    nz = clamp(fixed.z, -295, 295);
+    p.x = nx;
+    p.z = nz;
+    p.speedKmh = Math.round((moving ? speed : 0) * 3.6);
 
-    // --- jump: Space, simple vertical velocity + gravity, land on y = 0.
-    if (input && input.jumping() && grounded) {
-      vy = PLAYER.jumpSpeed;
-      grounded = false;
+    // Jump with gravity; Space only launches from the ground.
+    if (keys.pressed && keys.pressed('Space') && body.grounded) {
+      body.vy = 6.5;
+      body.grounded = false;
+      body.jumpFrom = { x: p.x, z: p.z };
     }
-    if (!grounded) {
-      vy -= PLAYER.gravity * dt;
-      p.y += vy * dt;
-      if (p.y <= 0) {
-        p.y = 0;
-        vy = 0;
-        grounded = true;
+    if (!body.grounded) {
+      body.vy -= 18 * dt;
+      let y = mesh.position.y + body.vy * dt;
+      if (y <= 0) {
+        y = 0;
+        body.vy = 0;
+        body.grounded = true;
+        // Longest jump: horizontal distance from takeoff to landing.
+        if (body.jumpFrom && state.stats) {
+          const d = Math.hypot(p.x - body.jumpFrom.x, p.z - body.jumpFrom.z);
+          state.stats.longestJump = Math.max(state.stats.longestJump || 0, d);
+        }
+        body.jumpFrom = null;
       }
+      mesh.position.y = y;
     }
 
-    // --- slow health regen after 10 s calm, only when not wanted.
-    if (p.wanted === 0 && p.health > 0 && p.health < PLAYER.health
-      && state.time - lastHurtAt > 10) {
-      p.health = Math.min(PLAYER.health, p.health + 1 * dt);
-    }
+    // Walk-cycle swing and facing.
+    if (moving) body.bob += dt * (running ? 11 : 8);
+    const swing = moving ? Math.sin(body.bob) * 0.55 : 0;
+    mesh.userData.legL.rotation.x = swing;
+    mesh.userData.legR.rotation.x = -swing;
+    mesh.userData.armL.rotation.x = -swing * 0.7;
+    mesh.userData.armR.rotation.x = swing * 0.7;
+    mesh.position.x = p.x;
+    mesh.position.z = p.z;
+    mesh.rotation.y = p.heading;
+
+    collectPickups();
   }
 
   return {
+    mesh,
+    body,
     update,
-    respawnWasted,
-    respawnAtHospital() { respawn(CITY.places.hospital, 200, 'WASTED'); },
-    get mesh() { return mesh; },
+    takeDamage,
+    heal,
+    die,
+    respawn,
+    collectPickups,
+    isDead: () => body.dead,
   };
 }

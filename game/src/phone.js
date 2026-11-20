@@ -1,212 +1,272 @@
-// Maravilla — the phone: call the crew for help. F opens it; 1-4 dial.
-// Each ability costs money and has a cooldown. The game keeps running while
-// the phone is open. Communicates only via state.* and events; never
-// imports another system.
+// phone.js — Rook's phone and the crew. Key F opens the phone panel;
+// the same four abilities sit on HUD cards with quick-call keys.
+// Every call checks its cooldown and its price first, then applies the
+// effect and confirms it on the message feed.
+//
+//   Mama Luz (B) — points at the next job. Free, 20s cooldown.
+//   Celia Reyes (Z) — scrubs 2 wanted stars. $150, 60s cooldown.
+//   Tito Fuentes (X) — repairs the ride. $100, 45s cooldown.
+//   Big Marlon (V) — clears nearby cops. $200, 90s cooldown.
 
-import { CREW } from './config.js';
-import { portraitUrl } from './portraits.js';
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
 
-const CALLS = [
+export const CREW = [
   {
-    id: 'luz', key: 'Digit1', quickKey: 'KeyB', cost: 0, cooldown: 0,
-    title: 'Get the next job',
-    desc: 'Mama Luz lines up the next mission.',
-    short: 'NEXT JOB',
+    id: 'luz',
+    name: 'Mama Luz',
+    role: 'Fixer',
+    key: 'KeyB',
+    keyLabel: 'B',
+    cost: 0,
+    cooldown: 20,
+    blurb: 'Knows every job in Maravilla before it happens.',
+    ability: 'Next job',
   },
   {
-    id: 'celia', key: 'Digit2', quickKey: 'KeyZ', cost: 150, cooldown: 60,
-    title: 'Scrub the heat — $150',
-    desc: 'Celia spoofs the dispatch feed. Wanted −2 stars.',
-    short: 'SCRUB HEAT',
+    id: 'celia',
+    name: 'Celia Reyes',
+    role: 'Driver / Hacker',
+    key: 'KeyZ',
+    keyLabel: 'Z',
+    cost: 150,
+    cooldown: 60,
+    blurb: 'Wipes the heat off the grid, two stars at a time.',
+    ability: 'Scrub heat −2 stars',
   },
   {
-    id: 'tito', key: 'Digit3', quickKey: 'KeyX', cost: 100, cooldown: 30,
-    title: 'Patch the ride — $100',
-    desc: 'Tito talks you through a field repair. Car back to full health.',
-    short: 'PATCH RIDE',
+    id: 'tito',
+    name: 'Tito Fuentes',
+    role: 'Mechanic',
+    key: 'KeyX',
+    keyLabel: 'X',
+    cost: 100,
+    cooldown: 45,
+    blurb: 'Can make a wrecked ride purr again over the phone.',
+    ability: 'Repair ride',
   },
   {
-    id: 'marlon', key: 'Digit4', quickKey: 'KeyV', cost: 200, cooldown: 90,
-    title: 'Clear the street — $200',
-    desc: 'Big Marlon leans on the beat cops. Foot cops within 30 m walk away.',
-    short: 'CLEAR STREET',
+    id: 'marlon',
+    name: 'Big Marlon',
+    role: 'Muscle',
+    key: 'KeyV',
+    keyLabel: 'V',
+    cost: 200,
+    cooldown: 90,
+    blurb: 'Has a word with the cops. They listen.',
+    ability: 'Clear nearby cops',
   },
 ];
 
-export function createPhone(ctx) {
-  const { state, events } = ctx;
-  const p = state.player;
-  let open = false;
-  let el = null;
-  let rows = [];
-  let cooldowns = { celia: 0, tito: 0, marlon: 0 };
-
-  function msg(text, kind = 'info') {
-    if (ctx.hud && ctx.hud.message) { ctx.hud.message(text, kind); return; }
-    if (state.messages) state.messages.push({ text, at: state.time, kind });
+function ensureCrew(state) {
+  if (!state.crew) state.crew = { cooldowns: {} };
+  if (!state.crew.cooldowns || typeof state.crew.cooldowns !== 'object') state.crew.cooldowns = {};
+  for (const member of CREW) {
+    if (typeof state.crew.cooldowns[member.id] !== 'number') state.crew.cooldowns[member.id] = 0;
   }
+  return state.crew.cooldowns;
+}
 
-  function build() {
-    if (el || typeof document === 'undefined') return;
-    el = document.createElement('div');
-    el.id = 'phone';
-    el.style.display = 'none';
-    el.innerHTML = '<div class="phone-title">ROOK’S PHONE</div><div class="phone-list"></div>'
-      + '<div class="phone-hint">Press 1–4 to call · F closes · Z / X / V / B quick-call from the HUD</div>';
-    const list = el.querySelector('.phone-list');
-    CALLS.forEach((c) => {
-      const crew = CREW[c.id];
-      const row = document.createElement('div');
-      row.className = 'phone-row';
-      row.dataset.crew = c.id;
-      row.innerHTML = `<span style="display:flex;align-items:center;gap:8px"><img class="crew-portrait" src="${portraitUrl(c.id)}" alt=""><b>${crew.name}</b></span><span class="phone-role">${crew.role}</span>`
-        + `<span class="phone-ability">${c.title}</span><span class="phone-desc">${c.desc}</span>`
-        + '<span class="phone-cd"></span>';
-      row.addEventListener('click', () => callCrew(c.id));
-      list.appendChild(row);
-      rows.push(row);
+function wantedHeatLevel(heat) {
+  if (heat <= 0) return 0;
+  if (heat <= 15) return 1;
+  if (heat <= 35) return 2;
+  if (heat <= 55) return 3;
+  if (heat <= 75) return 4;
+  return 5;
+}
+
+export function createPhone(state, bus) {
+  const cooldowns = ensureCrew(state);
+  let phoneOpen = false;
+  // The driving module keeps state.player.currentCar as a car id string,
+  // so track the live car object from the bus instead — Tito's repair
+  // needs the real object to reset its damage.
+  let currentCarObj = null;
+  if (bus && typeof bus.on === 'function') {
+    bus.on('entered-car', (d) => {
+      if (d && d.car) currentCarObj = d.car;
     });
-    document.body.appendChild(el);
-  }
-
-  function refresh() {
-    if (!el) return;
-    rows.forEach((row, i) => {
-      const call = CALLS[i];
-      if (!call) return;
-      const cd = row.querySelector('.phone-cd');
-      const left = Math.ceil(cooldowns[call.id] || 0);
-      const broke = call.cost > 0 && p.money < call.cost;
-      if (cd) cd.textContent = left > 0 ? `Ready in ${left}s` : (broke ? 'Not enough cash' : 'Ready');
-      row.classList.toggle('disabled', left > 0 || broke);
+    bus.on('exited-car', () => {
+      currentCarObj = null;
     });
   }
 
-  function openPhone() {
-    if (state.screen !== 'play') return;
-    build();
-    if (!el) return;
-    open = true;
-    el.style.display = 'block';
-    refresh();
+  function say(text) {
+    if (bus) bus.emit('message', { text });
   }
 
-  function closePhone() {
-    open = false;
-    if (el) el.style.display = 'none';
-  }
-
-  function callCrew(id, opts = {}) {
-    const call = CALLS.find((c) => c.id === id);
-    if (!call) return false;
-    // Quick-calls (Z/X/V/B from the HUD cards) work without opening the
-    // phone; the phone rows still need it open.
-    if (!opts.quick && !open) return false;
-    if ((cooldowns[id] || 0) > 0) {
-      msg(`${CREW[id].name} is busy — ${Math.ceil(cooldowns[id])}s left.`, 'bad');
-      return false;
+  function open() {
+    phoneOpen = true;
+    if (state.flags) state.flags.phoneOpen = true;
+    if (bus) {
+      bus.emit('phone-opened', {});
+      bus.emit('phone-ring', {});
     }
-    if (p.money < call.cost) {
-      msg(`Not enough cash for ${CREW[id].name} ($${call.cost}).`, 'bad');
-      return false;
-    }
-    if (id === 'luz') {
-      if (state.mission) { msg('Finish the current job first, Rook.', 'bad'); return false; }
-      if (state.nextMission >= 10) { msg('No more jobs, Rook. The city is yours.', 'info'); return false; }
-      if (ctx.missions && ctx.missions.startMission) {
-        if (!ctx.missions.startMission(state.nextMission)) return false;
-      } else {
-        msg('Mama Luz: Come see me at the garage, Rook.', 'info');
-        return false;
-      }
-      msg('Mama Luz lined up the next job.', 'good');
-    } else if (id === 'celia') {
-      if (p.wanted <= 0) { msg('No heat to scrub right now.', 'info'); return false; }
-      p.money -= call.cost;
-      if (ctx.police && ctx.police.addWanted) ctx.police.addWanted(-2);
-      else p.wanted = Math.max(0, p.wanted - 2);
-      msg('Celia: Dispatch feed spoofed. Two stars gone.', 'good');
-    } else if (id === 'tito') {
-      const veh = p.vehicleId !== null
-        ? state.vehicles.find((v) => v.id === p.vehicleId) : null;
-      const near = veh || state.vehicles.find(
-        (v) => Math.hypot(v.x - p.x, v.z - p.z) < 6,
-      );
-      if (!near) { msg('No car close enough for Tito to patch.', 'bad'); return false; }
-      p.money -= call.cost;
-      const upg = (state.garageUpgrades && state.garageUpgrades[near.defId]) || {};
-      near.health = 100 + 50 * (upg.armour || 0);
-      near._burning = false;
-      msg('Tito: She’s patched up. Good as new.', 'good');
-    } else if (id === 'marlon') {
-      const near = state.cops.filter(
-        (c) => c.kind === 'foot' && Math.hypot(c.x - p.x, c.z - p.z) < 30,
-      );
-      if (near.length === 0) { msg('No beat cops close enough to lean on.', 'info'); return false; }
-      p.money -= call.cost;
-      for (const cop of near) {
-        const i = state.cops.indexOf(cop);
-        if (i >= 0) state.cops.splice(i, 1);
-        if (cop.mesh && ctx.scene) ctx.scene.remove(cop.mesh);
-      }
-      msg(`Big Marlon cleared ${near.length} cop${near.length > 1 ? 's' : ''} off the street.`, 'good');
-    }
-    if (call.cooldown > 0) cooldowns[id] = call.cooldown;
-    if (ctx.audio && ctx.audio.play) ctx.audio.play('click');
-    if (events) events.emit('phone-call', { crew: id });
-    refresh();
     return true;
   }
 
-  if (typeof window !== 'undefined') {
-    window.addEventListener('keydown', (event) => {
-      if (event.repeat) return;
-      if (event.code === 'KeyF' && state.screen === 'play') {
-        if (open) closePhone();
-        else openPhone();
-        return;
-      }
-      // Quick-calls straight from the HUD cards (phone closed).
-      if (!open && state.screen === 'play') {
-        const quick = CALLS.find((c) => c.quickKey === event.code);
-        if (quick) callCrew(quick.id, { quick: true });
-        return;
-      }
-      if (!open) return;
-      if (event.code === 'Escape') { closePhone(); return; }
-      const call = CALLS.find((c) => c.key === event.code);
-      if (call) callCrew(call.id);
-    });
+  function close() {
+    phoneOpen = false;
+    if (state.flags) state.flags.phoneOpen = false;
+    if (bus) bus.emit('phone-closed', {});
   }
 
-  /** Crew-card state for the HUD: one row per crew member. */
-  function crewStatus() {
-    return CALLS.map((c) => {
-      const crew = CREW[c.id];
-      const left = Math.ceil(cooldowns[c.id] || 0);
-      const broke = c.cost > 0 && p.money < c.cost;
-      return {
-        id: c.id, name: crew.name, role: crew.role, short: c.short,
-        cost: c.cost, quickKey: c.quickKey.replace('Key', ''),
-        cooldownLeft: left, affordable: !broke,
-        state: left > 0 ? `Ready in ${left}s` : (broke ? `Need $${c.cost}` : 'Ready'),
-      };
-    });
+  function toggle() {
+    if (phoneOpen) close();
+    else open();
+    return phoneOpen;
+  }
+
+  function cooldownLeft(id) {
+    return Math.max(0, Math.ceil(cooldowns[id] || 0));
+  }
+
+  function applyEffect(member) {
+    if (member.id === 'luz') {
+      // Mama Luz points at the next job: the missions module owns the
+      // objective, so this is a request it answers plus a feed note.
+      if (bus) bus.emit('next-job-requested', { from: 'luz' });
+      const objective = state.missions && state.missions.objective ? state.missions.objective : null;
+      say(
+        objective
+          ? 'Mama Luz: next job is ' + objective + '. Get moving, Rook.'
+          : 'Mama Luz: check the map, Rook — the next job is marked.',
+      );
+      return { ok: true };
+    }
+    if (member.id === 'celia') {
+      if (!state.wanted) state.wanted = { level: 0, heat: 0, crime: '' };
+      const before = state.wanted.level;
+      state.wanted.heat = clamp((state.wanted.heat || 0) - 40, 0, 100);
+      state.wanted.level = wantedHeatLevel(state.wanted.heat);
+      if (state.wanted.heat === 0) state.wanted.crime = '';
+      if (bus) {
+        bus.emit('heat-scrubbed', { stars: 2, before, after: state.wanted.level });
+        bus.emit('wanted-changed', { level: state.wanted.level, heat: state.wanted.heat, crime: state.wanted.crime });
+      }
+      say('Celia: heat scrubbed. You are down to ' + state.wanted.level + ' star' + (state.wanted.level === 1 ? '' : 's') + '.');
+      return { ok: true };
+    }
+    if (member.id === 'tito') {
+      const car = currentCarObj;
+      if (car) {
+        car.damage = 0;
+        car.burning = false;
+        car.burnTime = 0;
+        if (car.fireLight && car.fireLight.parent) car.fireLight.parent.remove(car.fireLight);
+        car.fireLight = null;
+      }
+      if (bus) bus.emit('ride-repaired', { car: car && car.id ? car.id : null });
+      say('Tito: ride’s patched up. Good as new — well, nearly.');
+      return { ok: true };
+    }
+    if (member.id === 'marlon') {
+      if (bus) bus.emit('clear-cops', { radius: 60, from: 'marlon' });
+      say('Big Marlon: handled. The cops near you are walking away.');
+      return { ok: true };
+    }
+    return { ok: false, reason: 'unknown crew member' };
+  }
+
+  function call(id) {
+    const member = CREW.find((m) => m.id === id);
+    if (!member) return { ok: false, reason: 'unknown crew member' };
+    const left = cooldownLeft(id);
+    if (left > 0) {
+      say(member.name + ' is busy — try again in ' + left + 's.');
+      return { ok: false, reason: 'cooldown', secondsLeft: left };
+    }
+    const player = state.player || {};
+    const money = typeof player.money === 'number' ? player.money : 0;
+    if (member.cost > 0 && money < member.cost) {
+      say('Not enough cash for ' + member.name + ' — needs $' + member.cost + '.');
+      return { ok: false, reason: 'not enough cash', cost: member.cost };
+    }
+    if (member.id === 'celia' && (!state.wanted || (state.wanted.level || 0) === 0)) {
+      say('Celia: you are clean right now. Save the money, Rook.');
+      return { ok: false, reason: 'no heat to scrub' };
+    }
+    if (member.id === 'tito' && (!player.currentCar || player.onFoot !== false)) {
+      say('Tito: get in a car first, then I will fix it.');
+      return { ok: false, reason: 'not in a car' };
+    }
+    if (member.cost > 0) player.money = money - member.cost;
+    cooldowns[id] = member.cooldown;
+    const result = applyEffect(member);
+    if (bus) {
+      bus.emit('phone-used', { id, name: member.name, cost: member.cost });
+      bus.emit('crew-called', { id, name: member.name });
+    }
+    return result;
+  }
+
+  function getAbilities() {
+    const player = state.player || {};
+    const money = typeof player.money === 'number' ? player.money : 0;
+    return CREW.map((m) => ({
+      id: m.id,
+      name: m.name,
+      role: m.role,
+      keyLabel: m.keyLabel,
+      cost: m.cost,
+      cooldown: m.cooldown,
+      cooldownLeft: cooldownLeft(m.id),
+      affordable: money >= m.cost,
+      ability: m.ability,
+      blurb: m.blurb,
+    }));
   }
 
   function update(dt) {
-    for (const k of Object.keys(cooldowns)) {
-      if (cooldowns[k] > 0) cooldowns[k] = Math.max(0, cooldowns[k] - dt);
+    if (!dt || dt <= 0) return;
+    for (const member of CREW) {
+      if (cooldowns[member.id] > 0) cooldowns[member.id] = Math.max(0, cooldowns[member.id] - dt);
     }
-    if (open) refresh();
+  }
+
+  function handleKey(code) {
+    if (code === 'KeyF') {
+      toggle();
+      return true;
+    }
+    if (code === 'Escape' && phoneOpen) {
+      close();
+      return true;
+    }
+    const member = CREW.find((m) => m.key === code);
+    if (member) {
+      call(member.id);
+      return true;
+    }
+    return false;
   }
 
   return {
     update,
-    open: openPhone,
-    close: closePhone,
-    callCrew,
-    crewStatus,
-    get isOpen() { return open; },
+    open,
+    close,
+    toggle,
+    isOpen() {
+      return phoneOpen;
+    },
+    call,
+    callLuz() {
+      return call('luz');
+    },
+    callCelia() {
+      return call('celia');
+    },
+    callTito() {
+      return call('tito');
+    },
+    callMarlon() {
+      return call('marlon');
+    },
+    cooldownLeft,
+    getAbilities,
+    crewList: CREW,
+    handleKey,
   };
 }

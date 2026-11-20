@@ -1,451 +1,534 @@
-// Maravilla — wanted system + law enforcement: foot cops, patrol cars,
-// roadblocks, helicopter. Listens for 'crime' events, raises/clears wanted,
-// spawns and drives cops via state.cops / state.heli. Never imports a system.
+// police.js — Maravilla PD: wanted level, heat, pursuit units, dispatch feed.
+//
+// The wanted system runs on heat (0-100). Crimes add heat, scaled by how
+// the district the player is standing in feels about them: the same crime
+// lands much harder in a hostile district than a loyal one. Heat decays
+// while the player lays low, and the wanted level is derived from heat.
+// Units spawn by level: foot cops and patrol cars at low heat, roadblocks
+// from 3 stars, a helicopter from 4 stars. Every unit carries a callsign
+// that is unique forever: one global serial counter plus a disjoint
+// prefix pool per unit type, so no callsign can ever repeat.
 
-import * as THREE from 'three';
-import { CITY, WANTED, VEHICLES, COP_CALLSIGNS, COP_ROLES } from './config.js';
-
-function showEndScreen(title, text) {
-  if (typeof document === 'undefined') return;
-  const screen = document.getElementById('end-screen');
-  const t = document.getElementById('end-title');
-  const tx = document.getElementById('end-text');
-  if (screen) screen.style.display = 'flex';
-  if (t) t.textContent = title;
-  if (tx) tx.textContent = text;
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
 }
 
-let copSeq = 1;
-// ONE global callsign sequence + disjoint pools per unit type (config):
-// no two units ever share a callsign, whatever spawns when.
-let callSeq = 0;
+function distance2d(ax, az, bx, bz) {
+  const dx = ax - bx;
+  const dz = az - bz;
+  return Math.sqrt(dx * dx + dz * dz);
+}
 
-/** A dispatch identity for a unit: HALCON-1 / BEAT, TIBURON-3 / RAMMING. */
-function assignCallsign(kind) {
-  const pool = COP_CALLSIGNS[kind] || COP_CALLSIGNS.foot;
-  const roles = COP_ROLES[kind] || COP_ROLES.foot;
-  const i = callSeq;
-  callSeq += 1;
-  return {
-    callsign: `${pool[i % pool.length]}-${Math.floor(i / pool.length) + 1}`,
-    role: roles[i % roles.length],
+// Small deterministic PRNG (mulberry32). Gameplay randomness must never
+// come from Math.random or the clock, so this module keeps its own seeded
+// stream and prefers a shared one on state.rng when the state provides it.
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function next() {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
 
-/** Human-readable label for the crime that brought the heat. */
-const CRIME_LABELS = {
-  carjack: 'CARJACKING', 'ped-hit': 'ASSAULT', 'shoot-cop': 'SHOT A COP',
-  heat: 'FLEEING THE LAW', explosion: 'EXPLOSION',
+function makeRng(state, seed) {
+  if (state && state.rng && typeof state.rng.next === 'function') {
+    const shared = state.rng;
+    return {
+      next: () => shared.next(),
+      range: (a, b) => a + (b - a) * shared.next(),
+      int: (a, b) => Math.floor(a + (b - a + 1) * shared.next()),
+      pick: (list) => list[Math.floor(shared.next() * list.length)],
+    };
+  }
+  const next = mulberry32(seed);
+  return {
+    next,
+    range: (a, b) => a + (b - a) * next(),
+    int: (a, b) => Math.floor(a + (b - a + 1) * next()),
+    pick: (list) => list[Math.floor(next() * list.length)],
+  };
+}
+
+// Heat bands -> wanted stars. A 60-heat carjacking lands at 36 heat
+// (3 stars) in a loyal district and 100 heat (5 stars) in a hostile one.
+const HEAT_BANDS = [
+  { max: 0, level: 0 },
+  { max: 15, level: 1 },
+  { max: 35, level: 2 },
+  { max: 55, level: 3 },
+  { max: 75, level: 4 },
+  { max: 100, level: 5 },
+];
+
+export function wantedLevelForHeat(heat) {
+  for (const band of HEAT_BANDS) {
+    if (heat <= band.max) return band.level;
+  }
+  return 5;
+}
+
+// Base heat per crime type, before the district multiplier.
+export const CRIME_HEAT = {
+  shove: 12,
+  theft: 25,
+  assault: 40,
+  carjacking: 60,
+  shooting: 70,
+  killing: 85,
+  explosion: 90,
 };
 
-function makeFootCopMesh(THREE_) {
-  const g = new THREE_.Group();
-  const navy = new THREE_.MeshLambertMaterial({ color: 0x1c2733 });
-  const skin = new THREE_.MeshLambertMaterial({ color: 0xc98d64 });
-  const body = new THREE_.Mesh(new THREE_.CapsuleGeometry(0.42, 0.7, 4, 10), navy);
-  body.position.y = 1.05;
-  body.castShadow = true;
-  g.add(body);
-  const head = new THREE_.Mesh(new THREE_.SphereGeometry(0.3, 12, 10), skin);
-  head.position.y = 1.95;
-  g.add(head);
-  const hat = new THREE_.Mesh(new THREE_.CylinderGeometry(0.34, 0.36, 0.14, 12),
-    new THREE_.MeshLambertMaterial({ color: 0x0e1626 }));
-  hat.position.y = 2.2;
-  g.add(hat);
-  const badge = new THREE_.Mesh(new THREE_.BoxGeometry(0.12, 0.12, 0.05),
-    new THREE_.MeshLambertMaterial({ color: 0xffd94d }));
-  badge.position.set(-0.2, 1.35, 0.42);
-  g.add(badge);
-  return g;
+export const CRIME_LABELS = {
+  shove: 'DISORDERLY CONDUCT',
+  theft: 'PETTY THEFT',
+  assault: 'ASSAULT',
+  carjacking: 'GRAND THEFT AUTO',
+  shooting: 'DISCHARGING A FIREARM',
+  killing: 'HOMICIDE',
+  explosion: 'DESTRUCTION OF PROPERTY',
+};
+
+// District standing tiers, mirroring the districts module.
+function tierForStanding(value) {
+  if (value >= 75) return 'LOYAL';
+  if (value >= 50) return 'WARM';
+  if (value >= 25) return 'NEUTRAL';
+  if (value >= 0) return 'COLD';
+  return 'HOSTILE';
 }
 
-function makeSimpleCopCarMesh(THREE_) {
-  const g = new THREE_.Group();
-  const body = new THREE_.Mesh(new THREE_.BoxGeometry(2, 0.7, 4.4),
-    new THREE_.MeshLambertMaterial({ color: 0x1c2733 }));
-  body.position.y = 0.65;
-  body.castShadow = true;
-  g.add(body);
-  const cab = new THREE_.Mesh(new THREE_.BoxGeometry(1.7, 0.55, 2.2),
-    new THREE_.MeshLambertMaterial({ color: 0x2c3e50 }));
-  cab.position.set(0, 1.25, -0.2);
-  g.add(cab);
-  const bar = new THREE_.Mesh(new THREE_.BoxGeometry(1.2, 0.18, 0.3),
-    new THREE_.MeshLambertMaterial({ color: 0xff4040, emissive: 0xaa1010 }));
-  bar.position.set(0, 1.6, -0.2);
-  g.add(bar);
-  return g;
+const TIER_HEAT_GAIN = { LOYAL: 0.6, WARM: 0.8, NEUTRAL: 1.0, COLD: 1.3, HOSTILE: 1.7 };
+const TIER_HEAT_DECAY = { LOYAL: 1.5, WARM: 1.25, NEUTRAL: 1.0, COLD: 0.8, HOSTILE: 0.6 };
+const TIER_COP_SPEED = { LOYAL: 0.85, WARM: 0.95, NEUTRAL: 1.0, COLD: 1.05, HOSTILE: 1.15 };
+
+// How many of each unit type the department fields at each wanted level.
+const DEPLOYMENT = {
+  0: { foot: 0, patrol: 0, rammer: 0, roadblock: 0, heli: 0 },
+  1: { foot: 2, patrol: 1, rammer: 0, roadblock: 0, heli: 0 },
+  2: { foot: 3, patrol: 2, rammer: 0, roadblock: 0, heli: 0 },
+  3: { foot: 2, patrol: 3, rammer: 1, roadblock: 2, heli: 0 },
+  4: { foot: 2, patrol: 3, rammer: 2, roadblock: 3, heli: 1 },
+  5: { foot: 3, patrol: 4, rammer: 2, roadblock: 4, heli: 1 },
+};
+
+const UNIT_DEFS = {
+  foot: { prefix: 'FOOT', role: 'Beat', speed: 4.6, radius: 1.0 },
+  patrol: { prefix: 'UNIT', role: 'Pursuit', speed: 13.0, radius: 2.2 },
+  rammer: { prefix: 'RAM', role: 'Ramming', speed: 16.5, radius: 2.2 },
+  roadblock: { prefix: 'BLOCK', role: 'Roadblock', speed: 0, radius: 2.4 },
+  heli: { prefix: 'AIR', role: 'Air', speed: 20.0, radius: 3.0 },
+};
+
+const TICKER_LINES = {
+  1: [
+    'MPD responding to a disturbance call',
+    'Units asked to keep an eye out in the area',
+    'Patrols sweeping the block, stay calm',
+  ],
+  2: [
+    'Suspect vehicle reported, units converging',
+    'MPD setting up a perimeter around the district',
+    'Dispatch: suspect is mobile, use caution',
+  ],
+  3: [
+    'Roadblocks going up on the main avenues',
+    'Air support on standby, ground units pursue',
+    'Detective El Gato wants this one brought in',
+  ],
+  4: [
+    'Helicopter over the scene, spotlight on the suspect',
+    'All units: suspect is considered armed',
+    'Roadblocks on every exit, nobody slips out',
+  ],
+  5: [
+    'Full city alert, every available unit responding',
+    'El Gato has taken command of the pursuit',
+    'Maravilla PD will not let this one go',
+  ],
+};
+
+function ensureWanted(state) {
+  if (!state.wanted) state.wanted = { level: 0, heat: 0, crime: '' };
+  if (typeof state.wanted.level !== 'number') state.wanted.level = 0;
+  if (typeof state.wanted.heat !== 'number') state.wanted.heat = 0;
+  if (typeof state.wanted.crime !== 'string') state.wanted.crime = '';
+  return state.wanted;
 }
 
-export function createPolice(ctx) {
-  const { state, scene, events, city, rng } = ctx;
-  const THREE_ = ctx.THREE || THREE;
-  const p = state.player;
-  const rand = rng || Math.random;
+function playerPos(state) {
+  const p = state.player || {};
+  return { x: typeof p.x === 'number' ? p.x : 0, z: typeof p.z === 'number' ? p.z : 0 };
+}
 
-  let decayTimer = 0;
-  let roadblockLevel = 0;
-  let roadblocks = []; // cop entities acting as a stationary block
-  let heliRotor = null;
-  let searchlight = null;
+function playerHeading(state) {
+  const p = state.player || {};
+  return typeof p.heading === 'number' ? p.heading : 0;
+}
 
-  function msg(text, kind = 'info') {
-    if (ctx.hud && ctx.hud.message) { ctx.hud.message(text, kind); return; }
-    if (state.messages) state.messages.push({ text, at: state.time, kind });
-    if (events) events.emit('message', { text, kind });
+export function createPolice(state, bus) {
+  const rng = makeRng(state, 0x504f4c49); // 'POLI'
+  const wanted = ensureWanted(state);
+
+  // One global serial counter for every unit ever created. Callsign pools
+  // are disjoint by prefix, so a callsign can never repeat.
+  let nextSerial = 1;
+  let units = [];
+  let elapsed = 0;
+  let secondsSinceCrime = 999;
+  let spawnTimer = 0;
+  let standDownTimer = 0;
+  let bustTimer = 0;
+  let lastTickerIndex = -1;
+
+  function districtStanding(name) {
+    const d = state.districts;
+    if (d && d.standing && typeof d.standing[name] === 'number') return d.standing[name];
+    return 50;
   }
 
-  function addWanted(n) {
-    const before = p.wanted;
-    // Standing in this district scales the heat: loyal streets forgive,
-    // hostile ones do not.
-    const gain = (state.standingFx && state.standingFx.wantedGain) || 1;
-    const scaled = n > 0 ? Math.max(1, Math.round(n * gain)) : n;
-    p.wanted = Math.max(0, Math.min(WANTED.max, p.wanted + scaled));
-    p.lastCrime = state.time;
-    decayTimer = 0;
-    if (p.wanted > before) {
-      if (p.wanted >= 4) msg('The helicopter is on you. Lose them, Rook!', 'bad');
-      else if (p.wanted === 3) msg('Roadblocks going up across Maravilla.', 'bad');
-      else if (p.wanted === 2) msg('Patrol cars are rolling. Keep moving.', 'bad');
-      else msg('The cops are onto you.', 'bad');
+  function currentDistrictName() {
+    const p = state.player || {};
+    if (typeof p.district === 'string' && p.district) return p.district;
+    if (state.districts && typeof state.districts.current === 'string') return state.districts.current;
+    return 'Centro Alba';
+  }
+
+  function currentTier() {
+    return tierForStanding(districtStanding(currentDistrictName()));
+  }
+
+  function makeCallsign(type) {
+    const serial = nextSerial;
+    nextSerial += 1;
+    return UNIT_DEFS[type].prefix + '-' + String(serial).padStart(3, '0');
+  }
+
+  function spawnUnit(type) {
+    const def = UNIT_DEFS[type];
+    const p = playerPos(state);
+    const angle = rng.range(0, Math.PI * 2);
+    const ring = type === 'heli' ? rng.range(20, 45) : rng.range(70, 130);
+    let x = p.x + Math.cos(angle) * ring;
+    let z = p.z + Math.sin(angle) * ring;
+    let y = 0;
+    if (type === 'roadblock') {
+      // Roadblocks go up ahead of the player, across their path.
+      const h = playerHeading(state);
+      const ahead = rng.range(45, 75);
+      const lateral = rng.pick([-9, 0, 9]);
+      x = p.x + Math.sin(h) * ahead + Math.cos(h) * lateral;
+      z = p.z + Math.cos(h) * ahead - Math.sin(h) * lateral;
+    }
+    if (type === 'heli') y = 46;
+    const unit = {
+      id: 'police-' + nextSerial,
+      callsign: makeCallsign(type),
+      type,
+      role: def.role,
+      x,
+      y,
+      z,
+      speed: def.speed,
+      radius: def.radius,
+      ramCooldown: 0,
+      giveUp: 0,
+    };
+    units.push(unit);
+    return unit;
+  }
+
+  function desiredCounts(level) {
+    return DEPLOYMENT[clamp(level, 0, 5)];
+  }
+
+  function maintainDeployment() {
+    const want = desiredCounts(wanted.level);
+    const have = { foot: 0, patrol: 0, rammer: 0, roadblock: 0, heli: 0 };
+    for (const u of units) have[u.type] += 1;
+    for (const type of Object.keys(want)) {
+      while (have[type] < want[type] && units.length < 14) {
+        spawnUnit(type);
+        have[type] += 1;
+      }
+    }
+    // Too many of a type (level dropped): the extras give up first.
+    for (const type of Object.keys(want)) {
+      while (have[type] > want[type]) {
+        const idx = units.findIndex((u) => u.type === type);
+        if (idx < 0) break;
+        units.splice(idx, 1);
+        have[type] -= 1;
+      }
     }
   }
 
-  function clearWanted() {
-    p.wanted = 0;
-    decayTimer = 0;
+  function applyLevelChange(oldLevel, newLevel) {
+    if (oldLevel === newLevel) return;
+    wanted.level = newLevel;
+    // Escaped the law: heat fully cleared after having been wanted.
+    if (newLevel === 0 && oldLevel > 0 && state.stats) {
+      state.stats.copsEscaped = (state.stats.copsEscaped || 0) + 1;
+    }
+    if (bus) {
+      bus.emit('wanted-changed', { level: newLevel, heat: wanted.heat, crime: wanted.crime });
+      bus.emit('message', {
+        text:
+          newLevel === 0
+            ? 'You slipped away. The heat is off.'
+            : 'Wanted level ' + newLevel + ' — Maravilla PD is on you.',
+      });
+    }
   }
 
-  if (events) {
-    events.on('crime', (d) => {
-      if (!d) return;
-      const amount = typeof d.amount === 'number' ? d.amount : 1;
-      state.crimeLabel = CRIME_LABELS[d.type] || 'CRIME SPREE';
-      addWanted(amount);
+  function refreshLevel() {
+    const next = wantedLevelForHeat(Math.round(wanted.heat));
+    applyLevelChange(wanted.level, next);
+  }
+
+  function addHeat(amount, crimeKey, districtName) {
+    const district = districtName || currentDistrictName();
+    const tier = tierForStanding(districtStanding(district));
+    const scaled = amount * TIER_HEAT_GAIN[tier];
+    wanted.heat = clamp(wanted.heat + scaled, 0, 100);
+    if (crimeKey && CRIME_LABELS[crimeKey]) wanted.crime = CRIME_LABELS[crimeKey];
+    secondsSinceCrime = 0;
+    refreshLevel();
+    if (bus) {
+      bus.emit('heat-changed', { heat: wanted.heat, level: wanted.level, tier, district });
+      bus.emit('message', { text: 'WANTED FOR: ' + wanted.crime + ' — ' + district + ' (' + tier + ')' });
+    }
+    return { heat: wanted.heat, level: wanted.level, tier };
+  }
+
+  function reportCrime(crimeKey, districtName) {
+    const base = CRIME_HEAT[crimeKey] || 25;
+    const result = addHeat(base, crimeKey, districtName);
+    // The district hears about it too.
+    if (bus) bus.emit('crime-committed', { crime: crimeKey, district: districtName || currentDistrictName() });
+    return result;
+  }
+
+  function clearHeat(amount) {
+    wanted.heat = clamp(wanted.heat - amount, 0, 100);
+    if (wanted.heat === 0) wanted.crime = '';
+    refreshLevel();
+    return wanted.heat;
+  }
+
+  function scrubStars(stars) {
+    // Celia's scrub: two stars is worth forty heat.
+    return clearHeat(stars * 20);
+  }
+
+  function clearNearby(radius) {
+    const p = playerPos(state);
+    const before = units.length;
+    units = units.filter((u) => {
+      if (u.type === 'heli') return true;
+      return distance2d(u.x, u.z, p.x, p.z) > radius;
     });
-  }
-
-  function removeCopMesh(cop) {
-    if (cop.mesh && scene) scene.remove(cop.mesh);
-    if (cop.vehicleMesh && scene) scene.remove(cop.vehicleMesh);
-  }
-
-  function despawnAll(reason) {
-    for (const cop of state.cops) removeCopMesh(cop);
-    state.cops.length = 0;
-    for (const rb of roadblocks) removeCopMesh(rb);
-    roadblocks = [];
-    roadblockLevel = 0;
-    if (state.heli) {
-      if (state.heli.mesh && scene) scene.remove(state.heli.mesh);
-      state.heli = null;
-      heliRotor = null;
-      searchlight = null;
+    const cleared = before - units.length;
+    if (bus && cleared > 0) {
+      bus.emit('message', { text: 'Big Marlon cleared ' + cleared + ' unit' + (cleared === 1 ? '' : 's') + ' off your tail.' });
     }
-    if (reason) msg(reason, 'good');
+    return cleared;
   }
 
-  function spawnPosNear(dist) {
-    // On a road near the player, so cops arrive plausibly.
-    const a = rand() * Math.PI * 2;
-    let x = p.x + Math.cos(a) * dist;
-    let z = p.z + Math.sin(a) * dist;
-    if (city && city.nearestRoadAxis) {
-      const axis = city.nearestRoadAxis(x, z);
-      if (axis) {
-        if (axis.axis === 'x') x = axis.at;
-        else z = axis.at;
+  function updateUnit(u, dt, copSpeedMul) {
+    const p = playerPos(state);
+    const player = state.player || {};
+    const playerSpeed = typeof player.speedKmh === 'number' ? player.speedKmh : 0;
+    const inCar = player.onFoot === false && player.currentCar;
+    if (u.ramCooldown > 0) u.ramCooldown -= dt;
+
+    if (u.type === 'foot') {
+      const d = distance2d(u.x, u.z, p.x, p.z);
+      if (d > 0.01) {
+        const step = Math.min(d, u.speed * copSpeedMul * dt);
+        u.x += ((p.x - u.x) / d) * step;
+        u.z += ((p.z - u.z) / d) * step;
+      }
+      // A foot cop who catches the player on foot starts a bust.
+      if (player.onFoot !== false && d < 2.5 && wanted.level > 0) {
+        bustTimer += dt;
+        if (bustTimer > 2.5) {
+          bustTimer = 0;
+          if (bus) bus.emit('busted', { level: wanted.level, district: currentDistrictName() });
+        }
+      }
+      return;
+    }
+
+    if (u.type === 'heli') {
+      const k = Math.min(1, dt * 1.5);
+      u.x += (p.x - u.x) * k;
+      u.z += (p.z - u.z) * k;
+      u.y = 46;
+      return;
+    }
+
+    if (u.type === 'roadblock') return; // Roadblocks hold their ground.
+
+    // Patrol and rammer cars chase. Rammers aim ahead of the player to cut
+    // them off; patrol cars drive straight at them.
+    let tx = p.x;
+    let tz = p.z;
+    if (u.type === 'rammer') {
+      const h = playerHeading(state);
+      const lead = clamp(playerSpeed * 0.35, 0, 14);
+      tx = p.x + Math.sin(h) * lead;
+      tz = p.z + Math.cos(h) * lead;
+    }
+    const d = distance2d(u.x, u.z, tx, tz);
+    if (d > 0.01) {
+      const step = Math.min(d, u.speed * copSpeedMul * dt);
+      u.x += ((tx - u.x) / d) * step;
+      u.z += ((tz - u.z) / d) * step;
+    }
+    const touch = distance2d(u.x, u.z, p.x, p.z);
+    const ramRange = inCar ? 4.5 : 3.0;
+    if (touch < ramRange && u.ramCooldown <= 0) {
+      u.ramCooldown = 3;
+      const damage = u.type === 'rammer' ? 14 : 8;
+      if (bus) {
+        bus.emit('rammed', { callsign: u.callsign, damage, inCar });
+        bus.emit('vehicle-damaged', { amount: damage, source: u.callsign });
+        if (!inCar) bus.emit('player-hurt', { amount: 6, source: u.callsign });
       }
     }
-    return {
-      x: Math.max(-290, Math.min(290, x)),
-      z: Math.max(-290, Math.min(290, z)),
-    };
-  }
-
-  function spawnFootCop() {
-    const pos = spawnPosNear(30 + rand() * 25);
-    const cop = {
-      id: `cop-${copSeq++}`, x: pos.x, z: pos.z, heading: 0,
-      speed: 0, kind: 'foot', state: 'chase', health: 100, mesh: null,
-      ...assignCallsign('foot'),
-    };
-    if (scene) {
-      cop.mesh = makeFootCopMesh(THREE_);
-      cop.mesh.position.set(cop.x, 0, cop.z);
-      scene.add(cop.mesh);
-    }
-    state.cops.push(cop);
-    return cop;
-  }
-
-  function spawnCarCop() {
-    const pos = spawnPosNear(40 + rand() * 30);
-    const cop = {
-      id: `cop-${copSeq++}`, x: pos.x, z: pos.z, heading: 0,
-      speed: 0, kind: 'car', state: 'chase', health: 100, mesh: null,
-      vehicleId: null,
-      ...assignCallsign('car'),
-    };
-    // Prefer Builder A's vehicle factory; fall back to a simple box car.
-    const factory = ctx.vehicles && ctx.vehicles.spawnVehicle;
-    if (factory) {
-      try {
-        const v = factory('patrulla', pos.x, pos.z, 0);
-        if (v) cop.vehicleId = v.id || v;
-      } catch (e) { /* fall through to the box mesh */ }
-    }
-    if (!cop.vehicleId && scene) {
-      cop.mesh = makeSimpleCopCarMesh(THREE_);
-      cop.mesh.position.set(cop.x, 0, cop.z);
-      scene.add(cop.mesh);
-    }
-    state.cops.push(cop);
-    return cop;
-  }
-
-  function spawnRoadblock() {
-    // 2-3 stationary patrol cars across the nearest road ahead of the player.
-    const ahead = 60;
-    const fx = Math.sin(p.heading);
-    const fz = Math.cos(p.heading);
-    const cx = p.x + fx * ahead;
-    const cz = p.z + fz * ahead;
-    let axis = null;
-    if (city && city.nearestRoadAxis) axis = city.nearestRoadAxis(cx, cz);
-    const count = 2 + (rand() > 0.5 ? 1 : 0);
-    for (let i = 0; i < count; i += 1) {
-      const off = (i - (count - 1) / 2) * 5;
-      let x = cx;
-      let z = cz;
-      let heading = 0;
-      if (axis && axis.axis === 'x') { x = axis.at; z = cz + off; heading = Math.PI / 2; }
-      else if (axis) { z = axis.at; x = cx + off; heading = 0; }
-      const rb = {
-        id: `rb-${copSeq++}`, x, z, heading, speed: 0,
-        kind: 'car', state: 'roadblock', health: 100, mesh: null, vehicleId: null,
-        ...assignCallsign('roadblock'),
-      };
-      if (scene) {
-        rb.mesh = makeSimpleCopCarMesh(THREE_);
-        rb.mesh.position.set(x, 0, z);
-        rb.mesh.rotation.y = heading;
-        scene.add(rb.mesh);
-      }
-      roadblocks.push(rb);
-    }
-    roadblockLevel = p.wanted;
-    msg('Roadblock ahead — find another way through!', 'bad');
-  }
-
-  function spawnHeli() {
-    if (state.heli || !scene) return;
-    const g = new THREE_.Group();
-    const body = new THREE_.Mesh(new THREE_.BoxGeometry(2.2, 1.4, 4.6),
-      new THREE_.MeshLambertMaterial({ color: 0x1c2733 }));
-    body.castShadow = true;
-    g.add(body);
-    const tail = new THREE_.Mesh(new THREE_.BoxGeometry(0.5, 0.5, 3.4),
-      new THREE_.MeshLambertMaterial({ color: 0x1c2733 }));
-    tail.position.set(0, 0.2, -3.6);
-    g.add(tail);
-    heliRotor = new THREE_.Group();
-    const blade = new THREE_.Mesh(new THREE_.BoxGeometry(9, 0.08, 0.4),
-      new THREE_.MeshLambertMaterial({ color: 0x2c313a }));
-    heliRotor.add(blade);
-    const blade2 = blade.clone();
-    blade2.rotation.y = Math.PI / 2;
-    heliRotor.add(blade2);
-    heliRotor.position.y = 1;
-    g.add(heliRotor);
-    // Searchlight cone (translucent), visible at night.
-    searchlight = new THREE_.Mesh(
-      new THREE_.ConeGeometry(6, 40, 16, 1, true),
-      new THREE_.MeshBasicMaterial({
-        color: 0xfff2b0, transparent: true, opacity: 0.14,
-        side: THREE_.DoubleSide, depthWrite: false,
-      }),
-    );
-    searchlight.position.y = -20;
-    searchlight.rotation.x = Math.PI; // cone points down
-    searchlight.visible = false;
-    g.add(searchlight);
-    g.position.set(p.x, 40, p.z);
-    scene.add(g);
-    const id = assignCallsign('air');
-    state.heli = { x: p.x, z: p.z, y: 40, heading: 0, mesh: g, callsign: id.callsign, role: id.role };
-  }
-
-  function busted() {
-    if (state.screen !== 'play') return;
-    p.busted = true;
-    state.screen = 'busted';
-    p._respawnPending = 'busted';
-    if (events) events.emit('player-down', { kind: 'busted' });
-    const bail = 300;
-    showEndScreen('BUSTED', `El Gato finally got his collar. Bail: $${bail}. ` +
-      `Missions done: ${state.stats.missionsDone} · Money earned: $${state.stats.moneyEarned}`);
-    if (ctx.hud && ctx.hud.banner) ctx.hud.banner('BUSTED', 'El Gato is smiling. He loves paperwork.');
-  }
-
-  function nearestCopDist() {
-    let best = Infinity;
-    for (const cop of state.cops) {
-      const d = Math.hypot(cop.x - p.x, cop.z - p.z);
-      if (d < best) best = d;
-    }
-    for (const rb of roadblocks) {
-      const d = Math.hypot(rb.x - p.x, rb.z - p.z);
-      if (d < best) best = d;
-    }
-    if (state.heli) {
-      const d = Math.hypot(state.heli.x - p.x, state.heli.z - p.z);
-      if (d < best) best = d;
-    }
-    return best;
   }
 
   function update(dt) {
-    if (state.screen !== 'play') return;
+    if (!dt || dt <= 0) return;
+    elapsed += dt;
+    secondsSinceCrime += dt;
 
-    // --- remove dead cops (shot by the player in weapons.js).
-    for (let i = state.cops.length - 1; i >= 0; i -= 1) {
-      if (state.cops[i].health <= 0) {
-        removeCopMesh(state.cops[i]);
-        state.cops.splice(i, 1);
-      }
+    // Heat decays while the player lays low: no new crime for a while and
+    // no active shooting. Loyal districts cool off faster, hostile slower.
+    const layingLow = secondsSinceCrime > 6;
+    if (layingLow && wanted.heat > 0) {
+      const tier = currentTier();
+      const decay = 1.2 * TIER_HEAT_DECAY[tier] * dt;
+      wanted.heat = clamp(wanted.heat - decay, 0, 100);
+      if (wanted.heat === 0) wanted.crime = '';
+      refreshLevel();
     }
 
-    // --- wanted decay: -1 per 20 s with no crime and no cop within 40 m.
-    // Standing scales it: loyal streets forget you faster.
-    if (p.wanted > 0) {
-      const decayMult = (state.standingFx && state.standingFx.decayMult) || 1;
-      const sinceCrime = state.time - (p.lastCrime ?? -100);
-      if (sinceCrime > WANTED.decayTime && nearestCopDist() > 40) {
-        decayTimer += dt * decayMult;
-        if (decayTimer >= WANTED.decayTime) {
-          decayTimer = 0;
-          p.wanted -= 1;
-          if (p.wanted === 0) msg('You lost them. Maravilla forgets fast.', 'good');
-          else msg(`Heat dropping — ${p.wanted} star${p.wanted > 1 ? 's' : ''} left.`, 'good');
-        }
-      } else {
-        decayTimer = 0;
+    if (wanted.level > 0) {
+      spawnTimer -= dt;
+      if (spawnTimer <= 0) {
+        spawnTimer = 2;
+        maintainDeployment();
+      }
+      const copSpeedMul = TIER_COP_SPEED[currentTier()];
+      for (const u of units) updateUnit(u, dt, copSpeedMul);
+      // Roadblocks the player smashes through are gone for good.
+      const p = playerPos(state);
+      const player = state.player || {};
+      if (player.onFoot === false && player.currentCar) {
+        units = units.filter((u) => {
+          if (u.type !== 'roadblock') return true;
+          if (distance2d(u.x, u.z, p.x, p.z) < 5) {
+            if (bus) {
+              bus.emit('roadblock-smashed', { callsign: u.callsign });
+              bus.emit('vehicle-damaged', { amount: 15, source: u.callsign });
+            }
+            return false;
+          }
+          return true;
+        });
+      }
+    } else if (units.length > 0) {
+      // Heat is gone: units stand down one at a time instead of vanishing.
+      standDownTimer -= dt;
+      if (standDownTimer <= 0) {
+        standDownTimer = 1;
+        units.pop();
+        if (units.length === 0 && bus) bus.emit('pursuit-ended', {});
       }
     }
-    p.hidden = nearestCopDist() > 40 ? (p.hidden || 0) + dt : 0;
+  }
 
-    // --- despawn everything at zero wanted.
-    if (p.wanted === 0 && (state.cops.length > 0 || roadblocks.length > 0 || state.heli)) {
-      despawnAll();
-      return;
-    }
-    if (p.wanted === 0) return;
+  function getDispatch() {
+    const p = playerPos(state);
+    const rows = units
+      .map((u) => ({
+        callsign: u.callsign,
+        role: u.role,
+        type: u.type,
+        distanceM: Math.round(distance2d(u.x, u.z, p.x, p.z)),
+        x: u.x,
+        z: u.z,
+      }))
+      .sort((a, b) => a.distanceM - b.distanceM);
+    const lines = TICKER_LINES[clamp(wanted.level, 1, 5)] || [];
+    const ticker =
+      wanted.level === 0
+        ? 'All quiet across Maravilla.'
+        : lines.length > 0
+          ? lines[Math.floor(elapsed / 4) % lines.length]
+          : '';
+    if (lastTickerIndex !== Math.floor(elapsed / 4)) lastTickerIndex = Math.floor(elapsed / 4);
+    return {
+      level: wanted.level,
+      heat: Math.round(wanted.heat),
+      crime: wanted.crime || '—',
+      wantedFor: wanted.crime || '—',
+      district: currentDistrictName(),
+      tier: currentTier(),
+      units: rows,
+      ticker,
+    };
+  }
 
-    // --- spawn to the wanted level: 1 + wanted cops total.
-    const wantFoot = Math.min(1 + p.wanted, 3);
-    const wantCars = p.wanted >= 2 ? p.wanted - 1 : 0;
-    const footNow = state.cops.filter((c) => c.kind === 'foot').length;
-    const carNow = state.cops.filter((c) => c.kind === 'car').length;
-    for (let i = footNow; i < wantFoot; i += 1) spawnFootCop();
-    for (let i = carNow; i < wantCars; i += 1) spawnCarCop();
-
-    // --- roadblocks at 3+ stars, once per level.
-    if (p.wanted >= WANTED.roadblockAt && roadblockLevel < p.wanted) spawnRoadblock();
-    if (p.wanted < WANTED.roadblockAt && roadblocks.length > 0) {
-      for (const rb of roadblocks) removeCopMesh(rb);
-      roadblocks = [];
-      roadblockLevel = 0;
-    }
-
-    // --- helicopter at 4+ stars.
-    if (p.wanted >= WANTED.heliAt) spawnHeli();
-    else if (state.heli) {
-      if (state.heli.mesh && scene) scene.remove(state.heli.mesh);
-      state.heli = null;
-      heliRotor = null;
-      searchlight = null;
-    }
-
-    // --- foot cops chase on foot (run 7 — slower than the player's run 10).
-    // Standing scales their speed: hostile streets send faster cops.
-    const copSpeed = (state.standingFx && state.standingFx.copSpeed) || 1;
-    for (const cop of state.cops) {
-      if (cop.kind !== 'foot') continue;
-      const dx = p.x - cop.x;
-      const dz = p.z - cop.z;
-      const d = Math.hypot(dx, dz) || 1;
-      const speed = 7 * copSpeed;
-      cop.x += (dx / d) * speed * dt;
-      cop.z += (dz / d) * speed * dt;
-      cop.heading = Math.atan2(dx, dz);
-      cop.speed = speed;
-      if (cop.mesh) {
-        cop.mesh.position.set(cop.x, 0, cop.z);
-        cop.mesh.rotation.y = cop.heading;
-      }
-      // Arrest on touch, only while the player is on foot.
-      if (p.onFoot && d < 1.6) {
-        busted();
-        return;
-      }
-    }
-
-    // --- patrol cars chase the player's car (top 46 < a sport car's 52,
-    // so a fast driver escapes; on foot they bust on touch).
-    for (const cop of state.cops) {
-      if (cop.kind !== 'car') continue;
-      const dx = p.x - cop.x;
-      const dz = p.z - cop.z;
-      const d = Math.hypot(dx, dz) || 1;
-      const top = VEHICLES.patrulla.topSpeed * copSpeed;
-      const speed = Math.min(top, 12 + d * 0.5);
-      cop.x += (dx / d) * speed * dt;
-      cop.z += (dz / d) * speed * dt;
-      cop.heading = Math.atan2(dx, dz);
-      cop.speed = speed;
-      if (cop.mesh) {
-        cop.mesh.position.set(cop.x, 0, cop.z);
-        cop.mesh.rotation.y = cop.heading;
-      }
-      if (cop.vehicleId) {
-        const v = state.vehicles.find((veh) => veh.id === cop.vehicleId);
-        if (v) {
-          v.x = cop.x; v.z = cop.z; v.heading = cop.heading; v.speed = speed;
-        }
-      }
-      if (p.onFoot && d < 2.2) {
-        busted();
-        return;
-      }
-    }
-
-    // --- helicopter follows, hovers 40 m up, rotor spins, light at night.
-    if (state.heli) {
-      const h = state.heli;
-      const dx = p.x - h.x;
-      const dz = p.z - h.z;
-      const d = Math.hypot(dx, dz) || 1;
-      const follow = Math.min(30, d * 0.8);
-      h.x += (dx / d) * follow * dt;
-      h.z += (dz / d) * follow * dt;
-      h.heading = Math.atan2(dx, dz);
-      if (heliRotor) heliRotor.rotation.y += dt * 18;
-      if (h.mesh) {
-        h.mesh.position.set(h.x, h.y, h.z);
-        h.mesh.rotation.y = h.heading;
-      }
-      const isNight = state.dayTime > 0.8 || state.dayTime < 0.2;
-      if (searchlight) searchlight.visible = isNight;
-    }
+  if (bus) {
+    bus.on('crime', (data) => {
+      if (!data) return;
+      reportCrime(data.type || data.crime || 'theft', data.district);
+    });
+    bus.on('clear-cops', (data) => {
+      clearNearby(data && data.radius ? data.radius : 60);
+    });
+    bus.on('scrub-heat', (data) => {
+      scrubStars(data && data.stars ? data.stars : 2);
+    });
   }
 
   return {
     update,
-    addWanted,
-    clearWanted,
-    get roadblocks() { return roadblocks; },
+    addHeat,
+    reportCrime,
+    clearHeat,
+    scrubStars,
+    clearNearby,
+    setWanted(level) {
+      const target = clamp(level, 0, 5);
+      wanted.heat = target === 0 ? 0 : [0, 8, 25, 45, 65, 88][target];
+      // The wanted level was just (re)asserted: the player is not laying
+      // low, so the heat-decay clock restarts here.
+      secondsSinceCrime = 0;
+      refreshLevel();
+    },
+    getDispatch,
+    getUnits() {
+      return units.slice();
+    },
+    unitCount() {
+      return units.length;
+    },
+    isPursued() {
+      return wanted.level > 0 && units.length > 0;
+    },
+    wantedLevel() {
+      return wanted.level;
+    },
+    heat() {
+      return wanted.heat;
+    },
+    currentDistrict: currentDistrictName,
+    currentTier,
   };
 }

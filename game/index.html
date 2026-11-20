@@ -1,198 +1,256 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Maravilla — One Last Score</title>
+<title>MARAVILLA — One Last Score</title>
+<link rel="icon" href="data:,">
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #0e1626; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
-  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-  #hud { position: fixed; inset: 0; pointer-events: none; color: #f2f4f6; text-shadow: 0 1px 3px rgba(0,0,0,.8); }
-  .panel { background: rgba(10, 14, 22, .55); border: 1px solid rgba(255,255,255,.14); border-radius: 8px; padding: 8px 12px; }
-  #top-left { position: absolute; top: 14px; left: 14px; display: flex; flex-direction: column; gap: 6px; }
-  .bar-row { display: flex; align-items: center; gap: 6px; }
-  .bar-label { font-size: 10px; font-weight: 800; letter-spacing: 1px; width: 52px; color: #cfd6de; }
-  .bar-num { font-size: 11px; font-weight: 700; width: 30px; color: #f2f4f6; }
-  .bar { width: 220px; height: 12px; background: rgba(0,0,0,.55); border-radius: 6px; overflow: hidden; }
-  .bar > div { height: 100%; }
-  #health-fill { background: linear-gradient(90deg, #37d67a, #7be495); width: 100%; }
-  #armour-fill { background: linear-gradient(90deg, #4fa8e8, #8ec9f2); width: 0%; }
-  #money { font-size: 22px; font-weight: 700; color: #7be495; }
-  #respect { font-size: 13px; color: #ffd98a; }
-  #district { font-size: 12px; color: #9fc2e8; }
-  #district-fx { font-size: 11px; color: #7be495; max-width: 300px; }
-  .district-bar { width: 220px; height: 6px; }
-  #district-fill { background: #ffd98a; width: 50%; }
-  /* MPD dispatch panel (left, below the message feed). */
-  #dispatch { position: absolute; left: 14px; top: 372px; width: 300px; font-size: 12px; display: none; }
-  .dp-title { font-weight: 800; letter-spacing: 1px; color: #ffb3c8; margin-bottom: 4px; }
-  .dp-crime { color: #ff9a9a; margin-bottom: 4px; }
-  .dp-row { display: flex; gap: 8px; background: rgba(10,14,22,.55); border-radius: 6px; padding: 4px 8px; margin-bottom: 3px; }
-  .dp-call { font-weight: 700; color: #ffd94d; }
-  .dp-role { color: #cfd6de; flex: 1; }
-  .dp-dist { color: #7be495; }
-  .dp-more { color: #cfd6de; padding-left: 8px; }
-  .dp-ticker { color: #9fc2e8; padding: 4px 8px 0; font-style: italic; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  /* Crew ability cards (right, above the weapon readout). */
-  #crew-cards { position: absolute; right: 16px; bottom: 190px; width: 250px; display: none; flex-direction: column; gap: 4px; font-size: 12px; }
-  .crew-card { display: flex; gap: 6px; align-items: center; background: rgba(10,14,22,.6); border: 1px solid rgba(255,255,255,.14); border-radius: 6px; padding: 5px 8px; }
-  .crew-key { font-weight: 800; color: #ffd94d; border: 1px solid rgba(255,217,77,.5); border-radius: 4px; padding: 0 5px; }
-  .crew-name { font-weight: 700; }
-  .crew-ability { color: #cfd6de; flex: 1; }
-  .crew-state { color: #7be495; }
-  .crew-state.cd { color: #ffd98a; }
-  .crew-state.broke { color: #ff9a9a; }
-  /* Staged mission line, under the objective. */
-  #mission-stage { position: absolute; top: 46px; left: 50%; transform: translateX(-50%); text-align: center; font-size: 14px; max-width: 560px; display: none; }
-  #mission-stage span { color: #cfd6de; }
-  .sp-chip { color: #ffd94d; font-weight: 800; }
-  #top-right { position: absolute; top: 14px; right: 14px; text-align: right; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
-  #stars { font-size: 26px; letter-spacing: 4px; color: #ffd94d; }
-  #clock { font-size: 20px; font-weight: 600; }
-  #radio { font-size: 13px; color: #ffb3c8; }
-  #objective { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); font-size: 17px; font-weight: 600; text-align: center; max-width: 560px; }
-  #message-feed { position: absolute; top: 200px; left: 14px; display: flex; flex-direction: column; gap: 4px; font-size: 14px; max-width: 420px; }
-  #message-feed div { background: rgba(10,14,22,.55); border-radius: 6px; padding: 5px 9px; }
-  #minimap-wrap { position: absolute; left: 14px; bottom: 14px; }
-  #minimap { display: block; border-radius: 50%; border: 3px solid rgba(255,255,255,.35); background: #101820; }
-  #speedo { position: absolute; right: 16px; bottom: 16px; text-align: right; }
-  #speed { font-size: 44px; font-weight: 800; line-height: 1; }
-  #speed-unit { font-size: 13px; color: #cfd6de; }
-  #vehicle-name { font-size: 15px; color: #ffd98a; }
-  #weapon { position: absolute; right: 16px; bottom: 110px; text-align: right; font-size: 16px; display: none; }
-  #weapon-ammo { color: #cfd6de; }
-  /* Persistent weapon slot bar (bottom right, above the speedo). */
-  #weapon-bar { position: absolute; right: 16px; bottom: 100px; display: none; gap: 4px; pointer-events: auto; }
-  .wb-slot { width: 74px; background: rgba(10,14,22,.62); border: 2px solid rgba(255,255,255,.18); border-radius: 8px; padding: 5px 4px 4px; text-align: center; color: #f2f4f6; cursor: pointer; }
-  .wb-slot.current { border-color: #ffd94d; box-shadow: 0 0 0 1px #7be495 inset; }
-  .wb-slot.locked { opacity: .55; }
-  .wb-icon { display: block; color: #ffd94d; line-height: 1; }
-  .wb-slot.locked .wb-icon { color: #9aa4ae; }
-  .wb-name { display: block; font-size: 10px; font-weight: 700; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .wb-ammo { display: block; font-size: 11px; color: #cfd6de; }
-  .wb-lock { display: block; font-size: 9px; font-weight: 800; color: #ff9a9a; letter-spacing: .5px; }
-  .crew-portrait { width: 30px; height: 30px; border-radius: 50%; border: 1px solid rgba(255,255,255,.35); flex: none; }
-  .sp-portrait { width: 30px; height: 30px; border-radius: 50%; vertical-align: middle; margin-right: 6px; border: 1px solid rgba(255,255,255,.4); }
-  .wheel-slot.locked { opacity: .55; }
-  .wheel-slot .wheel-lock { color: #ff9a9a; font-size: 11px; font-weight: 800; }
-  #crosshair { position: absolute; left: 50%; top: 50%; width: 22px; height: 22px; transform: translate(-50%, -50%); display: none; }
-  #crosshair::before, #crosshair::after { content: ''; position: absolute; background: #fff; box-shadow: 0 0 3px #000; }
-  #crosshair::before { left: 10px; top: 0; width: 2px; height: 22px; }
-  #crosshair::after { left: 0; top: 10px; width: 22px; height: 2px; }
-  #subtitle { position: absolute; left: 50%; bottom: 130px; transform: translateX(-50%); font-size: 19px; font-weight: 600; text-align: center; max-width: 720px; background: rgba(0,0,0,.55); padding: 8px 16px; border-radius: 8px; display: none; }
-  #mission-banner { position: absolute; left: 50%; top: 32%; transform: translate(-50%, -50%); text-align: center; display: none; }
-  #mission-banner h1 { font-size: 52px; margin: 0; letter-spacing: 3px; color: #ffd94d; }
-  #mission-banner p { font-size: 20px; margin: 6px 0 0; }
-  .screen { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: linear-gradient(180deg, rgba(10,16,30,.25), rgba(10,16,30,.78)); text-align: center; }
-  .screen h1 { font-size: 84px; margin: 0; letter-spacing: 6px; color: #ffd94d; text-shadow: 0 4px 24px rgba(0,0,0,.7); }
-  .screen h2 { font-size: 26px; margin: 4px 0 18px; letter-spacing: 8px; color: #ffb3c8; }
-  .screen p { font-size: 18px; margin: 4px 0; color: #eef1f5; }
-  .screen .prompt { margin-top: 26px; font-size: 20px; color: #7be495; font-weight: 700; animation: pulse 1.6s infinite; }
-  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
-  #help { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); font-size: 11px; line-height: 1.6; text-align: center; max-width: 640px; white-space: normal; color: #cfd6de; background: rgba(0,0,0,.45); padding: 6px 12px; border-radius: 6px; }
-  #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  /* Weapon wheel (radial overlay, opened with Tab). */
-  #weapon-wheel { position: fixed; left: 50%; top: 50%; width: 360px; transform: translate(-50%, -50%); z-index: 30; color: #f2f4f6; text-shadow: 0 1px 3px rgba(0,0,0,.8); }
-  .wheel-title { text-align: center; font-size: 22px; font-weight: 800; letter-spacing: 4px; color: #ffd94d; margin-bottom: 4px; }
-  .wheel-ring { position: relative; width: 360px; height: 360px; }
-  .wheel-slot { position: absolute; width: 104px; height: 64px; background: rgba(10,14,22,.78); border: 2px solid rgba(255,255,255,.25); border-radius: 10px; display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; font-size: 13px; }
-  .wheel-slot b { font-size: 14px; }
-  .wheel-slot .wheel-ammo { color: #cfd6de; font-size: 12px; }
-  .wheel-slot.active { border-color: #ffd94d; transform: scale(1.08); }
-  .wheel-slot.current { box-shadow: 0 0 0 2px #7be495 inset; }
-  .wheel-hint { text-align: center; font-size: 13px; color: #cfd6de; }
-  /* Phone + garage overlays (opened with F / G). */
-  #phone, #garage { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 460px; max-width: 92vw; background: rgba(10,14,22,.94); border: 1px solid rgba(255,255,255,.2); border-radius: 12px; padding: 16px 18px; z-index: 30; color: #f2f4f6; }
-  .phone-title, .garage-title { font-size: 20px; font-weight: 800; letter-spacing: 3px; color: #ffd94d; margin-bottom: 10px; }
-  .phone-row { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid rgba(255,255,255,.14); border-radius: 8px; margin-bottom: 8px; cursor: pointer; }
-  .phone-row:hover { border-color: #ffd94d; }
-  .phone-row.disabled { opacity: .45; cursor: default; }
-  .phone-role { color: #ffb3c8; font-size: 12px; }
-  .phone-ability { color: #7be495; font-size: 14px; font-weight: 600; }
-  .phone-desc { color: #cfd6de; font-size: 13px; }
-  .phone-cd { font-size: 12px; color: #ffd98a; }
-  .phone-hint, .garage-hint { font-size: 12px; color: #cfd6de; text-align: center; }
-  .garage-row { border: 1px solid rgba(255,255,255,.14); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
-  .garage-row b { font-size: 16px; }
-  .garage-sub { display: block; color: #cfd6de; font-size: 12px; margin: 2px 0 8px; }
-  .garage-btn { margin: 0 6px 6px 0; padding: 6px 10px; background: #1c2733; color: #f2f4f6; border: 1px solid rgba(255,255,255,.25); border-radius: 6px; cursor: pointer; font-size: 13px; }
-  .garage-btn:hover:not(:disabled) { border-color: #ffd94d; }
-  .garage-btn:disabled { opacity: .4; cursor: default; }
-  .garage-money { font-size: 16px; font-weight: 700; color: #7be495; }
-  .garage-empty { color: #cfd6de; }
-  /* Tabbed pause menu (MAP / MISSIONS / STATS / CREW / SAVE). */
-  #pause-menu { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 560px; max-width: 94vw; max-height: 88vh; overflow-y: auto; background: rgba(10,14,22,.96); border: 1px solid rgba(255,255,255,.2); border-radius: 12px; padding: 16px 18px; z-index: 40; color: #f2f4f6; pointer-events: auto; }
-  .pause-title { font-size: 22px; font-weight: 800; letter-spacing: 3px; color: #ffd94d; margin-bottom: 10px; }
-  .pause-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
-  .pause-tab { flex: 1; padding: 8px 4px; background: #1c2733; color: #cfd6de; border: 1px solid rgba(255,255,255,.2); border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 700; }
-  .pause-tab.active { background: #ffd94d; color: #1c2733; border-color: #ffd94d; }
-  .pause-body { font-size: 14px; }
-  .pause-body canvas { border-radius: 8px; border: 1px solid rgba(255,255,255,.2); max-width: 100%; }
-  .pause-act { margin-bottom: 12px; }
-  .pause-act-blurb { color: #9fc2e8; font-size: 12px; margin: 2px 0 6px; }
-  .pause-mission { padding: 6px 8px; border: 1px solid rgba(255,255,255,.14); border-radius: 6px; margin-bottom: 4px; }
-  .pause-mission.locked { opacity: .45; }
-  .pause-sub { display: block; color: #cfd6de; font-size: 12px; margin-top: 2px; }
-  .pause-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; }
-  .pause-stat { display: flex; justify-content: space-between; padding: 5px 8px; border-bottom: 1px solid rgba(255,255,255,.08); }
-  .pause-crew-row { display: flex; gap: 10px; align-items: center; padding: 8px; border: 1px solid rgba(255,255,255,.14); border-radius: 8px; margin-bottom: 8px; }
-  .pause-slot { padding: 8px; border: 1px solid rgba(255,255,255,.14); border-radius: 8px; margin-bottom: 8px; }
-  .pause-hint { font-size: 12px; color: #cfd6de; text-align: center; margin-top: 10px; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #14100c;
+    font-family: "Segoe UI", Verdana, sans-serif; color: #f2e8c9; }
+  #game-canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 10; }
+  #hud button { pointer-events: auto; cursor: pointer; }
+  .panel { background: rgba(12, 10, 8, 0.72); border: 1px solid rgba(242, 232, 201, 0.35);
+    border-radius: 8px; padding: 8px 10px; }
+  .muted { color: #c9bfa5; font-size: 11px; }
+
+  /* Top-left: vitals */
+  #stats-block { position: absolute; top: 10px; left: 10px; width: 250px; }
+  .bar-row { display: flex; align-items: center; gap: 6px; margin: 3px 0; font-size: 12px; }
+  .bar-row .bar-label { width: 52px; font-weight: bold; letter-spacing: 1px; }
+  .bar-track { flex: 1; height: 12px; background: rgba(255,255,255,0.15); border-radius: 6px; overflow: hidden; }
+  #health-fill { height: 100%; width: 100%; background: #37c978; }
+  #armour-fill { height: 100%; width: 25%; background: #4aa8e8; }
+  .bar-num { width: 26px; text-align: right; font-weight: bold; }
+  #money { font-size: 18px; font-weight: bold; color: #ffd23a; margin-top: 4px; }
+  #speed-line { font-size: 13px; margin-top: 2px; }
+  #speed-num { font-size: 20px; font-weight: bold; }
+  #wanted-stars { font-size: 20px; letter-spacing: 2px; color: #ffd23a; margin-top: 2px; }
+  #wanted-stars.hot { color: #ff4d2d; }
+  #radio-line, #clock-line { font-size: 12px; color: #e8dcc0; margin-top: 2px; }
+  #clock-label { font-weight: bold; font-size: 14px; }
+  #day-label { font-weight: bold; color: #ffd23a; }
+
+  /* Top-centre: next job */
+  #next-job { position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+    text-align: center; min-width: 380px; max-width: 46vw; }
+  #mission-title { font-size: 15px; font-weight: bold; letter-spacing: 1px; color: #ffd23a; }
+  #stage-pips { margin: 3px 0; }
+  #stage-pips .pip { color: rgba(255,255,255,0.35); font-size: 11px; margin: 0 2px; }
+  #stage-pips .pip.done { color: #37c978; }
+  #stage-pips .pip.current { color: #ffd23a; }
+  #next-objective { font-size: 12px; color: #f2e8c9; }
+
+  /* Top-right: district standing */
+  #district-panel { position: absolute; top: 10px; right: 10px; width: 230px; text-align: right; }
+  #district-label { font-size: 13px; font-weight: bold; }
+  .district-track { height: 10px; background: rgba(255,255,255,0.15); border-radius: 5px;
+    overflow: hidden; margin: 5px 0; }
+  #district-bar { height: 100%; width: 75%; background: linear-gradient(90deg, #c0392b, #f2b13c, #37c978); }
+  #district-note { font-size: 11px; color: #c9bfa5; }
+
+  /* Right-middle: police dispatch */
+  #dispatch-panel { position: absolute; top: 150px; right: 10px; width: 250px; display: none; }
+  #dispatch-panel h4 { margin: 0 0 4px 0; font-size: 12px; letter-spacing: 1px; color: #ff8a6a; }
+  .dispatch-row { display: flex; justify-content: space-between; font-size: 12px; padding: 2px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.08); }
+  .dispatch-row.empty { color: rgba(255,255,255,0.4); }
+  .dispatch-row .callsign { font-weight: bold; width: 76px; }
+  .dispatch-row .role { flex: 1; }
+  .dispatch-row .dist { width: 44px; text-align: right; }
+  #dispatch-ticker { font-size: 11px; color: #ffd23a; margin-top: 5px; font-style: italic; }
+  #dispatch-crime { font-size: 11px; color: #ff8a6a; margin-top: 2px; }
+
+  /* Left-middle: crew cards */
+  #crew-cards { position: absolute; left: 10px; top: 240px; display: flex; flex-direction: column; gap: 6px; }
+  .crew-card { display: flex; gap: 8px; align-items: center; width: 210px;
+    background: rgba(12, 10, 8, 0.72); border: 1px solid rgba(242, 232, 201, 0.35);
+    border-radius: 8px; padding: 6px; pointer-events: auto; cursor: pointer; }
+  .crew-card.cooling { opacity: 0.6; }
+  .crew-card canvas { width: 48px; height: 48px; border-radius: 6px; flex: none; }
+  .crew-label { display: flex; flex-direction: column; font-size: 11px; line-height: 1.35; }
+  .crew-label strong { font-size: 12px; }
+  .crew-key { color: #ffd23a; font-weight: bold; }
+  .crew-cd { color: #c9bfa5; }
+
+  /* Bottom-left: feed above rank */
+  #feed-stack { position: absolute; left: 10px; bottom: 30px; width: 380px; max-width: 40vw; }
+  #message-feed { font-size: 12px; }
+  #message-feed .feed-line { background: rgba(12, 10, 8, 0.66); border-radius: 4px;
+    padding: 3px 7px; margin-top: 3px; }
+  #rank-line { font-size: 12px; font-weight: bold; color: #ffd23a; margin-top: 6px;
+    background: rgba(12, 10, 8, 0.66); border-radius: 4px; padding: 4px 7px; }
+
+  /* Bottom-centre: weapon bar */
+  #weapon-bar { position: absolute; left: 50%; transform: translateX(-50%); bottom: 28px;
+    display: flex; gap: 6px; pointer-events: auto; }
+  .weapon-slot { width: 86px; background: rgba(12, 10, 8, 0.78); border: 1px solid rgba(242,232,201,0.3);
+    border-radius: 8px; padding: 5px 4px 4px; text-align: center; }
+  .weapon-slot canvas { width: 44px; height: 32px; }
+  .weapon-slot.current { border-color: #ffd23a; box-shadow: 0 0 8px rgba(255, 210, 58, 0.55); }
+  .weapon-slot.locked { opacity: 0.55; }
+  .weapon-label { display: flex; flex-direction: column; font-size: 10px; line-height: 1.3; }
+  .weapon-name { font-weight: bold; font-size: 11px; }
+  .weapon-state { color: #ffd23a; }
+
+  /* Bottom-right: minimap */
+  #minimap { position: absolute; right: 10px; bottom: 30px; width: 180px; height: 180px;
+    border: 2px solid rgba(242, 232, 201, 0.5); border-radius: 8px; background: #16324a; }
+
+  /* Dialogue sits above the weapon bar, never covering it */
+  #dialogue-box { position: absolute; left: 50%; transform: translateX(-50%); bottom: 150px;
+    width: 560px; max-width: 60vw; display: none; z-index: 30;
+    background: rgba(12, 10, 8, 0.88); border: 1px solid #ffd23a; border-radius: 10px;
+    padding: 10px 12px; pointer-events: auto; cursor: pointer; }
+  #dialogue-box canvas { width: 64px; height: 64px; border-radius: 8px; float: left; margin-right: 10px; }
+  .dialogue-text strong { color: #ffd23a; }
+  .dialogue-text p { margin: 4px 0; font-size: 14px; line-height: 1.45; }
+  .dialogue-hint { font-size: 11px; color: #c9bfa5; }
+
+  /* Help strip along the very bottom */
+  #help-bar { position: absolute; left: 0; right: 0; bottom: 4px; text-align: center;
+    font-size: 11px; color: rgba(242, 232, 201, 0.75); }
+
+  /* Centred overlay panels */
+  .overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(8, 6, 4, 0.72); z-index: 40; pointer-events: auto; padding-top: 8vh; }
+  .overlay-card { background: rgba(16, 12, 8, 0.96); border: 1px solid #ffd23a; border-radius: 12px;
+    padding: 18px 22px; width: 520px; max-width: 92vw; max-height: 88vh; overflow-y: auto; margin: auto; }
+  .overlay-card h3 { margin: 0 0 8px 0; color: #ffd23a; letter-spacing: 1px; }
+  .overlay-card button { background: #ffd23a; color: #14100c; border: none; border-radius: 6px;
+    padding: 7px 12px; font-weight: bold; margin: 3px 4px 3px 0; }
+  .overlay-card button:disabled { opacity: 0.45; cursor: default; }
+  .phone-row, .garage-car { display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    padding: 7px 0; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 13px; }
+  .phone-row strong, .garage-car strong { min-width: 110px; }
+  .phone-key { color: #ffd23a; font-weight: bold; }
+  .wheel-slot { padding: 8px; border: 1px solid rgba(242,232,201,0.3); border-radius: 8px;
+    margin: 5px 0; cursor: pointer; font-size: 13px; }
+  .wheel-slot.selected { border-color: #ffd23a; }
+  .wheel-slot.locked { opacity: 0.6; }
+  .wheel-slot strong { display: block; }
+  .wheel-slot span { display: block; font-size: 12px; color: #c9bfa5; }
+  /* Floating panels (phone / garage / weapon wheel) — main.js writes
+     their content directly, so they carry the card styling themselves. */
+  .float-panel { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    display: none; z-index: 35; pointer-events: auto;
+    background: rgba(16, 12, 8, 0.96); border: 1px solid #ffd23a; border-radius: 12px;
+    padding: 18px 22px; width: 520px; max-width: 92vw; max-height: 88vh; overflow-y: auto; }
+  .float-panel h3 { margin: 0 0 8px 0; color: #ffd23a; letter-spacing: 1px; }
+  .float-panel button { background: #ffd23a; color: #14100c; border: none; border-radius: 6px;
+    padding: 7px 12px; font-weight: bold; margin: 3px 4px 3px 0; }
+  .float-panel button:disabled { opacity: 0.45; cursor: default; }
+
+  /* Title screen */
+  #title-screen { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; text-align: center; z-index: 50; pointer-events: auto;
+    background: linear-gradient(180deg, rgba(20, 12, 6, 0.42) 0%, rgba(20, 12, 6, 0.78) 100%); }
+  #title-screen h1 { font-size: 64px; margin: 0; letter-spacing: 6px; color: #ffd23a;
+    text-shadow: 0 3px 0 #c0392b, 0 8px 24px rgba(0,0,0,0.8); }
+  #title-screen h2 { font-size: 20px; margin: 6px 0 0 0; letter-spacing: 4px; color: #f2e8c9; }
+  #title-screen p { max-width: 560px; font-size: 14px; line-height: 1.55; color: #efe6cf; }
+  #title-screen .controls { font-size: 12px; color: #d8cdae; }
+  #start-button { margin-top: 14px; background: #ffd23a; color: #14100c; border: none;
+    border-radius: 8px; padding: 12px 30px; font-size: 16px; font-weight: bold; cursor: pointer; }
+
+  /* Pause menu */
+  #pause-menu { z-index: 45; }
+  .pause-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+  .pause-tabs button { background: rgba(255,255,255,0.12); color: #f2e8c9; border: 1px solid rgba(242,232,201,0.3);
+    border-radius: 6px; padding: 6px 10px; font-weight: bold; }
+  .pause-tabs button.active { background: #ffd23a; color: #14100c; }
+  .pause-table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  .pause-table td, .pause-table th { border-bottom: 1px solid rgba(255,255,255,0.12); padding: 5px 6px; text-align: left; }
+
+  #end-screen { z-index: 46; }
+  #end-screen .overlay-card { text-align: center; }
+  #end-stats { font-size: 14px; line-height: 1.6; }
 </style>
+</head>
+<body>
+<canvas id="game-canvas"></canvas>
+
+<div id="hud">
+  <div id="stats-block" class="panel">
+    <div class="bar-row"><span class="bar-label">HEALTH</span><div class="bar-track"><div id="health-fill"></div></div><span class="bar-num" id="health-num">100</span></div>
+    <div class="bar-row"><span class="bar-label">ARMOUR</span><div class="bar-track"><div id="armour-fill"></div></div><span class="bar-num" id="armour-num">25</span></div>
+    <div id="money">$250</div>
+    <div id="speed-line"><span id="speed-num">0</span> <span id="speed-label">km/h on foot</span></div>
+    <div id="wanted-stars">☆☆☆☆☆</div>
+    <div id="radio-line">♪ <span id="radio-label">Faro Rock 101</span></div>
+    <div id="clock-line"><span id="clock-label">16:20</span> · <span id="day-label">DAY 1</span></div>
+  </div>
+
+  <div id="next-job" class="panel">
+    <div id="mission-title">MISSION 1 — FIRST KEYS</div>
+    <div id="stage-pips"></div>
+    <div id="next-objective">Go to the Marina Alba lockup</div>
+  </div>
+
+  <div id="district-panel" class="panel">
+    <div id="district-label">Paseo del Mar — WARM</div>
+    <div class="district-track"><div id="district-bar"></div></div>
+    <div id="district-note">Standing 50 — missions here lift it, crimes lower it.</div>
+  </div>
+
+  <div id="dispatch-panel" class="panel">
+    <h4>MARAVILLA PD — DISPATCH</h4>
+    <div id="dispatch-rows"></div>
+    <div id="dispatch-ticker">Maravilla PD — all quiet.</div>
+    <div id="dispatch-crime">No active warrant</div>
+  </div>
+
+  <div id="crew-cards"></div>
+
+  <div id="feed-stack">
+    <div id="message-feed"></div>
+    <div id="rank-line">ROOKIE — 0 RP — Respect 0</div>
+  </div>
+
+  <div id="weapon-bar"></div>
+
+  <canvas id="minimap" width="180" height="180"></canvas>
+
+  <div id="dialogue-box"></div>
+
+  <div id="help-bar">WASD move · E enter / exit car · Shift run / nitro · Space jump / handbrake · Tab weapons · 1-6 select · Click shoot · R reload · F phone · G garage · C radio · M mute · P pause</div>
+</div>
+
+<div id="phone-panel" class="float-panel"></div>
+<div id="garage-panel" class="float-panel"></div>
+<div id="wheel" class="float-panel"></div>
+
+<div id="pause-menu" class="overlay">
+  <div class="overlay-card">
+    <h3>PAUSED — MARAVILLA</h3>
+    <div class="pause-body"></div>
+    <p class="muted">P / Esc resumes. Number keys 1-5 switch tabs.</p>
+  </div>
+</div>
+
+<div id="end-screen" class="overlay">
+  <div class="overlay-card">
+    <h3>LEYENDA — ONE LAST SCORE</h3>
+    <p id="end-stats"></p>
+    <p>Rico Vega walks out of Maravilla free, the crew beside him and El Gato behind him. The city will remember this one.</p>
+    <button onclick="location.reload()">Play again</button>
+  </div>
+</div>
+
+<div id="title-screen">
+  <h1>MARAVILLA</h1>
+  <h2>ONE LAST SCORE</h2>
+  <p>Rico “Rook” Vega is home after five years away, and the crew is waiting: Mama Luz, Celia Reyes, Tito Fuentes and Big Marlon. One last score in a sun-drenched city — if Detective El Gato and Maravilla PD do not get to him first.</p>
+  <p class="controls">WASD walk · E steal &amp; drive · Shift run / nitro · Space jump / handbrake · Tab weapon wheel · Click shoot · F phone · G garage · C radio · P pause · Drag mouse to look, wheel to zoom</p>
+  <button id="start-button">START — PRESS ENTER</button>
+  <p class="controls">Headphones on: three radio stations play live from the city.</p>
+</div>
+
 <script type="importmap">
 { "imports": { "three": "./vendor/three.module.min.js" } }
 </script>
-</head>
-<body>
-<canvas id="game" aria-label="Maravilla: an open-world crime game. Drive, explore the city, take missions."></canvas>
-<div id="hud">
-  <div id="top-left">
-    <div class="bar-row"><span class="bar-label">HEALTH</span><div class="bar"><div id="health-fill"></div></div><span class="bar-num" id="health-num">100</span></div>
-    <div class="bar-row"><span class="bar-label">ARMOUR</span><div class="bar"><div id="armour-fill"></div></div><span class="bar-num" id="armour-num">25</span></div>
-    <div id="money" class="panel">$250</div>
-    <div id="respect">RANK D — ROOKIE · 0/500 RP</div>
-    <div id="district">MARINA ALBA — NEUTRAL · 50</div>
-    <div class="bar district-bar"><div id="district-fill"></div></div>
-    <div id="district-fx"></div>
-  </div>
-  <div id="top-right">
-    <div id="stars"></div>
-    <div id="clock" class="panel">17:30</div>
-    <div id="radio">RADIO SOL 98.5</div>
-  </div>
-  <div id="objective"></div>
-  <div id="mission-stage"></div>
-  <div id="message-feed"></div>
-  <div id="dispatch"></div>
-  <div id="crew-cards"></div>
-  <div id="minimap-wrap"><canvas id="minimap" width="190" height="190"></canvas></div>
-  <div id="speedo"><div id="vehicle-name"></div><div id="speed">0</div><div id="speed-unit">km/h</div></div>
-  <div id="weapon"><span id="weapon-name">Fists</span> <span id="weapon-ammo"></span></div>
-  <div id="weapon-bar"></div>
-  <div id="crosshair"></div>
-  <div id="subtitle"></div>
-  <div id="mission-banner"><h1 id="mission-title"></h1><p id="mission-sub"></p></div>
-  <div id="title-screen" class="screen">
-    <h1>MARAVILLA</h1>
-    <h2>ONE LAST SCORE</h2>
-    <p>Rico "Rook" Vega is back. The city never forgot him.</p>
-    <p>Drive. Steal. Survive. Ten missions stand between you and the last score.</p>
-    <p class="prompt" id="title-prompt">Press ENTER to play</p>
-    <p style="font-size:14px;color:#cfd6de">WASD move &amp; drive &middot; E enter / steal car &middot; Mouse drag camera &middot; Click shoot &middot; Tab weapon wheel &middot; F phone &middot; G garage &middot; C radio &middot; R reload &middot; H horn &middot; M mute &middot; P pause</p>
-  </div>
-  <div id="pause-screen" class="screen" style="display:none">
-    <h1 style="font-size:56px">PAUSED</h1>
-    <p>Maravilla waits for no one. Except now.</p>
-    <p class="prompt">Press P to resume</p>
-  </div>
-  <div id="end-screen" class="screen" style="display:none">
-    <h1 id="end-title" style="font-size:64px">BUSTED</h1>
-    <p id="end-text"></p>
-    <p class="prompt">Press ENTER to try again</p>
-  </div>
-  <div id="help">WASD move / drive &middot; E car &middot; Click shoot &middot; Tab wheel &middot; F phone &middot; G garage &middot; C radio &middot; R reload &middot; P pause</div>
-</div>
-<p id="status" role="status" aria-live="polite"></p>
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>

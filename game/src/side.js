@@ -1,383 +1,292 @@
-// Maravilla — side activities: 20 Golden Gecko collectibles, 5 stunt
-// jumps, repeatable district jobs, a 5-car export list, and the Casa Verde
-// safehouse. Everything pays, everything is tracked in state.side +
-// state.stats, and everything shows up in the pause menu's STATS tab.
-// Communicates only via state.* and events; never imports another system.
+// side.js — side activities for MARAVILLA: Golden Geckos, stunt jumps,
+// district jobs, the export list, and the Casa Verde safehouse.
+// Written from the prose design spec. All positions come from a fixed-seed
+// generator so every run places the same 20 geckos in the same spots.
 
-import * as THREE from 'three';
-import { CITY, VEHICLES, DISTRICTS } from './config.js';
-
-const GECKO_COUNT = 20;
-const GECKO_REWARD = 150;
-const JUMP_REWARD = 200;
-const EXPORT_REWARD = 1200;
+const GECKO_SEED = 20261120;
 const SAFEHOUSE_PRICE = 2000;
-const JOB_BASE_PAY = 200;
-const JOB_TIME = 120;
-const JOB_COOLDOWN = 60;
 
-// Stunt jumps: ramp spots (x, z, heading the ramp faces).
-const JUMPS = [
-  { x: 0, z: -120, heading: Math.PI / 2, name: 'Avenida Launch' },
-  { x: 240, z: 60, heading: 0, name: 'Beachfront Kicker' },
-  { x: -240, z: 120, heading: -Math.PI / 2, name: 'Faro Flyer' },
-  { x: 120, z: -240, heading: Math.PI, name: 'Stadium Leap' },
-  { x: -60, z: 240, heading: Math.PI / 2, name: 'Centro Air' },
+// Small seeded generator (mulberry-style). Gameplay randomness must never
+// come from Math.random or the clock, so side activities use this.
+function seededRng(seed) {
+  let a = seed >>> 0;
+  return function next() {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function geckoPositions() {
+  const next = seededRng(GECKO_SEED);
+  const spots = [];
+  // Hand-placed anchor spots first (landmarks), then seeded fill so the
+  // total is exactly 20 and the layout is stable across runs.
+  const anchors = [
+    { x: -258, z: -238, hint: 'by the lighthouse steps' },
+    { x: -252, z: 196, hint: 'on the lockup fence' },
+    { x: -278, z: 118, hint: 'on the dock crates' },
+    { x: 62, z: -118, hint: 'on the Banco Alba steps' },
+    { x: 218, z: 178, hint: 'on the stadium gate' },
+    { x: 178, z: -198, hint: 'on the hotel sign' },
+    { x: 138, z: 208, hint: 'in the Casa Verde garden' },
+    { x: 22, z: 38, hint: 'under the market lanterns' },
+  ];
+  for (const a of anchors) spots.push({ ...a });
+  while (spots.length < 20) {
+    const x = Math.round(-280 + next() * 560);
+    const z = Math.round(-260 + next() * 520);
+    if (spots.some((s) => Math.abs(s.x - x) < 24 && Math.abs(s.z - z) < 24)) continue;
+    spots.push({ x, z, hint: 'hidden in the streets' });
+  }
+  return spots.map((s, i) => ({ id: `gecko-${i + 1}`, ...s }));
+}
+
+export const GECKOS = geckoPositions();
+
+export const STUNT_JUMPS = [
+  { id: 'jump-pier', name: 'Pier Leap', district: 'Paseo del Mar', ramp: { x: -230, z: -60 }, land: { x: -190, z: -60 }, reward: 300 },
+  { id: 'jump-market', name: 'Market Flyer', district: 'Centro Alba', ramp: { x: 10, z: 20 }, land: { x: 50, z: 20 }, reward: 300 },
+  { id: 'jump-stadium', name: 'Stadium Air', district: 'Estadio Sol', ramp: { x: 200, z: 160 }, land: { x: 240, z: 160 }, reward: 400 },
+  { id: 'jump-faro', name: 'Lighthouse Drop', district: 'El Faro', ramp: { x: -240, z: -220 }, land: { x: -200, z: -220 }, reward: 400 },
+  { id: 'jump-marina', name: 'Marina Hop', district: 'Marina Alba', ramp: { x: -260, z: 160 }, land: { x: -220, z: 160 }, reward: 300 },
 ];
 
-// District job boards: one spot per district (walk up, press E).
-const JOB_SPOTS = [
-  { district: 'El Faro', x: -210, z: 90, name: 'Fish market' },
-  { district: 'Marina Alba', x: -210, z: -150, name: 'Dock office' },
-  { district: 'Centro Alba', x: -30, z: 90, name: 'Plaza kiosk' },
-  { district: 'Paseo del Mar', x: 30, z: -150, name: 'Night stall' },
-  { district: 'Miramar', x: 210, z: 150, name: 'Boardwalk stand' },
-  { district: 'Estadio Sol', x: 150, z: -150, name: 'Ticket booth' },
+// The five cars the export buyer wants, in order. Deliver the named car to
+// the Marina Alba dock for the payout.
+export const EXPORT_LIST = [
+  { id: 'export-1', car: 'Solano', payout: 1200 },
+  { id: 'export-2', car: 'Coral', payout: 1500 },
+  { id: 'export-3', car: 'Carguero', payout: 1000 },
+  { id: 'export-4', car: 'Tormenta S', payout: 2500 },
+  { id: 'export-5', car: 'Brisa', payout: 2000 },
 ];
 
-const EXPORT_POINT = { x: -260, z: -260, name: 'Marina Alba export dock' };
+export const EXPORT_DOCK = { x: -280, z: 120, label: 'Marina Alba dock' };
+export const SAFEHOUSE_POS = { x: 140, z: 210, label: 'Casa Verde' };
 
-export function createSide(ctx) {
-  const { state, scene, events, rng, city, input } = ctx;
-  const THREE_ = ctx.THREE || THREE;
-  const p = state.player;
-  const rand = rng || Math.random;
+// Repeatable job templates per district. Payouts scale with standing
+// (loyal districts pay 25% more); hostile districts close the board.
+const JOB_TEMPLATES = [
+  { kind: 'courier', name: 'Courier run', base: 120, blurb: 'Deliver a package across the district, no questions asked.' },
+  { kind: 'lookout', name: 'Lookout shift', base: 100, blurb: 'Watch a corner for an hour and whistle if you see blue lights.' },
+  { kind: 'tow', name: 'Tow job', base: 150, blurb: 'Drag a broken-down car to the nearest garage.' },
+  { kind: 'flyers', name: 'Flyer drop', base: 80, blurb: 'Paper the district with flyers for the night market.' },
+];
 
-  let geckos = []; // { i, x, z, mesh }
-  let jumpMeshes = [];
-  let exportMarker = null;
-  let safehouseMarker = null;
-  let jobMarker = null;
-  let activeJob = null; // { district, x, z, timer, pay }
-  let prevE = false;
-  let airT = 0; // remaining hop time for a stunt jump
-  let airVeh = null;
+function dist(a, b) {
+  const dx = a.x - b.x;
+  const dz = a.z - b.z;
+  return Math.sqrt(dx * dx + dz * dz);
+}
 
-  function msg(text, kind = 'info') {
-    if (ctx.hud && ctx.hud.message) { ctx.hud.message(text, kind); return; }
-    if (state.messages) state.messages.push({ text, at: state.time, kind });
+function tierOf(standing) {
+  if (standing >= 75) return 'LOYAL';
+  if (standing >= 50) return 'WARM';
+  if (standing >= 25) return 'NEUTRAL';
+  if (standing >= 0) return 'COLD';
+  return 'HOSTILE';
+}
+
+export function createSide(state, bus) {
+  const emit = (name, data) => {
+    if (bus && typeof bus.emit === 'function') bus.emit(name, data);
+  };
+  if (!state.collectibles) state.collectibles = {};
+  if (!Array.isArray(state.collectibles.geckosFound)) state.collectibles.geckosFound = [];
+  if (!Array.isArray(state.collectibles.jumpsDone)) state.collectibles.jumpsDone = [];
+  if (!Array.isArray(state.collectibles.exportsDone)) state.collectibles.exportsDone = [];
+  if (typeof state.collectibles.safehouseOwned !== 'boolean') state.collectibles.safehouseOwned = false;
+
+  let activeJob = null;
+
+  // --- Golden Geckos ------------------------------------------------------
+  function nearestGecko(pos, radius = 6) {
+    for (const g of GECKOS) {
+      if (state.collectibles.geckosFound.includes(g.id)) continue;
+      if (dist(pos, g) <= radius) return g;
+    }
+    return null;
   }
-  function setObjective(text) {
-    state.objective = text;
-    if (ctx.hud && ctx.hud.setObjective) ctx.hud.setObjective(text);
-  }
 
-  function goldGeckoMesh() {
-    const g = new THREE_.Group();
-    const gold = new THREE_.MeshLambertMaterial({ color: 0xf2c230, emissive: 0x8a6a10 });
-    const body = new THREE_.Mesh(new THREE_.OctahedronGeometry(0.55), gold);
-    body.position.y = 1.2;
-    body.castShadow = true;
-    g.add(body);
-    const tail = new THREE_.Mesh(new THREE_.ConeGeometry(0.18, 0.9, 6), gold);
-    tail.rotation.z = Math.PI / 2.4;
-    tail.position.set(0.55, 1.1, 0);
-    g.add(tail);
-    const eye = new THREE_.Mesh(new THREE_.SphereGeometry(0.09, 6, 6),
-      new THREE_.MeshBasicMaterial({ color: 0x1c2733 }));
-    eye.position.set(-0.4, 1.35, 0.2);
-    g.add(eye);
+  function collectGecko(pos) {
+    const g = nearestGecko(pos);
+    if (!g) return null;
+    state.collectibles.geckosFound.push(g.id);
+    const count = state.collectibles.geckosFound.length;
+    const bonus = count % 5 === 0 ? 250 : 50;
+    if (state.player) state.player.money = (state.player.money || 0) + bonus;
+    if (state.stats) {
+      state.stats.moneyEarned = (state.stats.moneyEarned || 0) + bonus;
+      state.stats.respect = (state.stats.respect || 0) + 2;
+    }
+    emit('gecko:found', { id: g.id, count, total: GECKOS.length, bonus });
+    emit('message', { text: `Golden Gecko found! ${count}/20 (+$${bonus})` });
+    if (count === GECKOS.length) {
+      emit('message', { text: 'All 20 Golden Geckos collected — Maravilla is yours, Leyenda!' });
+    }
     return g;
   }
 
-  function buildGeckos() {
-    if (!scene) return;
-    for (let i = 0; i < GECKO_COUNT; i += 1) {
-      let pt = null;
-      for (let tries = 0; tries < 6; tries += 1) {
-        const cand = city.randomSidewalkPoint(rand);
-        const fixed = city.collide(cand.x, cand.z, 0.6);
-        if (Math.hypot(fixed.x - cand.x, fixed.z - cand.z) < 0.05) { pt = cand; break; }
-      }
-      if (!pt) pt = city.randomSidewalkPoint(rand);
-      const mesh = goldGeckoMesh();
-      mesh.position.set(pt.x, 0, pt.z);
-      scene.add(mesh);
-      geckos.push({ i, x: pt.x, z: pt.z, mesh });
-    }
-    // Hide the ones a loaded save already collected.
-    for (const g of geckos) {
-      if ((state.side.geckoIds || []).includes(g.i)) {
-        g.mesh.visible = false;
+  // --- Stunt jumps ----------------------------------------------------------
+  function tryStuntJump(pos, speedKmh, airborne) {
+    for (const j of STUNT_JUMPS) {
+      if (state.collectibles.jumpsDone.includes(j.id)) continue;
+      if (airborne && speedKmh >= 60 && dist(pos, j.ramp) <= 12) {
+        state.collectibles.jumpsDone.push(j.id);
+        if (state.player) state.player.money = (state.player.money || 0) + j.reward;
+        if (state.stats) {
+          state.stats.moneyEarned = (state.stats.moneyEarned || 0) + j.reward;
+          // Longest jump: the ramp-to-landing distance of this stunt jump.
+          state.stats.longestJump = Math.max(state.stats.longestJump || 0, dist(j.ramp, j.land));
+        }
+        emit('jump:done', { id: j.id, name: j.name, reward: j.reward });
+        emit('message', { text: `Stunt jump: ${j.name}! (+$${j.reward})` });
+        return j;
       }
     }
+    return null;
   }
 
-  function buildJumps() {
-    if (!scene) return;
-    for (const j of JUMPS) {
-      const g = new THREE_.Group();
-      const ramp = new THREE_.Mesh(
-        new THREE_.BoxGeometry(4, 0.5, 6),
-        new THREE_.MeshLambertMaterial({ color: 0xf2c230 }),
-      );
-      ramp.position.y = 0.6;
-      ramp.rotation.x = -0.42;
-      ramp.castShadow = true;
-      g.add(ramp);
-      const chevron = new THREE_.Mesh(
-        new THREE_.ConeGeometry(0.7, 1.6, 4),
-        new THREE_.MeshBasicMaterial({ color: 0xffd94d }),
-      );
-      chevron.position.y = 2.6;
-      chevron.rotation.x = Math.PI;
-      g.add(chevron);
-      g.position.set(j.x, 0, j.z);
-      g.rotation.y = j.heading;
-      scene.add(g);
-      jumpMeshes.push(g);
+  // --- District jobs --------------------------------------------------------
+  function standingOf(district) {
+    if (state.districts && state.districts.standing) {
+      return state.districts.standing[district] ?? 50;
     }
+    return 50;
   }
 
-  function buildMarkers() {
-    if (!scene) return;
-    // Export dock marker (green flag) at Marina Alba.
-    exportMarker = new THREE_.Group();
-    const pole = new THREE_.Mesh(new THREE_.CylinderGeometry(0.09, 0.09, 5, 6),
-      new THREE_.MeshLambertMaterial({ color: 0x2c313a }));
-    pole.position.y = 2.5;
-    exportMarker.add(pole);
-    const flag = new THREE_.Mesh(new THREE_.PlaneGeometry(1.8, 1.1),
-      new THREE_.MeshBasicMaterial({ color: 0x37d67a, side: THREE_.DoubleSide }));
-    flag.position.set(0.95, 4.4, 0);
-    exportMarker.add(flag);
-    exportMarker.position.set(EXPORT_POINT.x, 0, EXPORT_POINT.z);
-    exportMarker.visible = false;
-    scene.add(exportMarker);
-    // Safehouse: a small green house + marker at Casa Verde.
-    safehouseMarker = new THREE_.Group();
-    const house = new THREE_.Mesh(new THREE_.BoxGeometry(6, 4, 5),
-      new THREE_.MeshLambertMaterial({ color: 0x2e8a5a }));
-    house.position.y = 2;
-    house.castShadow = true;
-    safehouseMarker.add(house);
-    const roof = new THREE_.Mesh(new THREE_.ConeGeometry(4.4, 2, 4),
-      new THREE_.MeshLambertMaterial({ color: 0xd84040 }));
-    roof.position.y = 5;
-    roof.rotation.y = Math.PI / 4;
-    safehouseMarker.add(roof);
-    const diamond = new THREE_.Mesh(new THREE_.OctahedronGeometry(0.9),
-      new THREE_.MeshBasicMaterial({ color: 0x37d67a }));
-    diamond.position.y = 7.5;
-    safehouseMarker.add(diamond);
-    safehouseMarker.position.set(CITY.places.safehouse.x, 0, CITY.places.safehouse.z);
-    scene.add(safehouseMarker);
+  function jobsFor(district) {
+    const tier = tierOf(standingOf(district));
+    if (tier === 'HOSTILE') return { open: false, tier, jobs: [] };
+    const payMult = tier === 'LOYAL' ? 1.25 : 1;
+    const jobs = JOB_TEMPLATES.map((t, i) => ({
+      id: `job-${district}-${i}`,
+      district,
+      kind: t.kind,
+      name: t.name,
+      blurb: t.blurb,
+      payout: Math.round(t.base * payMult),
+    }));
+    return { open: true, tier, jobs };
   }
 
-  function nearCar(dist) {
-    let best = Infinity;
-    for (const v of state.vehicles) {
-      const d = Math.hypot(v.x - p.x, v.z - p.z);
-      if (d < best) best = d;
+  function takeJob(district, jobId) {
+    const board = jobsFor(district);
+    if (!board.open) {
+      emit('message', { text: `The ${district} job board is closed — the district is HOSTILE.` });
+      return null;
     }
-    return best < dist;
-  }
-
-  function startJob(spot) {
-    const standing = state.districtStanding[spot.district] ?? 50;
-    const fx = state.standingFx || {};
-    if ((fx.jobMult || 1) <= 0 || standing < 25) {
-      msg(`${spot.district} is hostile — nobody there will hire you. Raise your standing first.`, 'bad');
-      return;
-    }
-    const readyAt = (state.side.jobCooldowns || {})[spot.district] || 0;
-    if (state.time < readyAt) {
-      msg(`No work at the ${spot.name} yet — come back in ${Math.ceil(readyAt - state.time)}s.`, 'info');
-      return;
-    }
-    // Destination: a random road point inside the same district.
-    const d = DISTRICTS.find((x) => x.name === spot.district);
-    let tx = spot.x + 40;
-    let tz = spot.z + 40;
-    for (let tries = 0; tries < 8; tries += 1) {
-      const cand = city.randomRoadPoint(rand);
-      if (d && cand.x >= d.minX && cand.x < d.maxX && cand.z >= d.minZ && cand.z < d.maxZ) {
-        tx = cand.x; tz = cand.z; break;
-      }
-    }
-    const pay = Math.round(JOB_BASE_PAY * (fx.jobMult || 1));
-    activeJob = { district: spot.district, x: tx, z: tz, timer: JOB_TIME, pay };
-    setObjective(`District job (${spot.district}): deliver the package — $${pay}.`);
-    msg(`Job from the ${spot.name}: deliver the package across ${spot.district} in ${JOB_TIME}s — $${pay}.`, 'info');
-    if (events) events.emit('mission', { stage: 'job-start', district: spot.district });
+    const job = board.jobs.find((j) => j.id === jobId) || board.jobs[0];
+    if (!job) return null;
+    activeJob = { ...job, startedAt: (state.stats && state.stats.timePlayed) || 0 };
+    emit('job:taken', { job: activeJob });
+    emit('message', { text: `Job taken: ${job.name} in ${district} ($${job.payout})` });
+    return activeJob;
   }
 
   function completeJob() {
-    if (!activeJob) return;
-    p.money += activeJob.pay;
-    p.rp += 25;
-    state.stats.moneyEarned += activeJob.pay;
-    state.stats.jobs += 1;
-    state.side.jobsDone += 1;
-    state.side.jobCooldowns[activeJob.district] = state.time + JOB_COOLDOWN;
-    msg(`Job done in ${activeJob.district}: +$${activeJob.pay}, +25 RP.`, 'good');
-    activeJob = null;
-    setObjective(state.mission ? state.mission.objective : 'Go to the yellow marker to start the next mission.');
-  }
-
-  function trySafehouse() {
-    const sh = CITY.places.safehouse;
-    if (Math.hypot(p.x - sh.x, p.z - sh.z) > 6) return false;
-    if (!state.side.safehouse) {
-      const mult = (state.standingFx && state.standingFx.priceMult) || 1;
-      const price = Math.round((SAFEHOUSE_PRICE * mult) / 10) * 10;
-      if (p.money < price) {
-        msg(`Casa Verde costs $${price} — you have $${Math.floor(p.money)}.`, 'bad');
-        return true;
-      }
-      p.money -= price;
-      state.side.safehouse = true;
-      msg('Casa Verde is yours. Press E here any time to rest: full health + save.', 'good');
-      return true;
+    if (!activeJob) return false;
+    const payout = activeJob.payout;
+    if (state.player) state.player.money = (state.player.money || 0) + payout;
+    if (state.stats) {
+      state.stats.moneyEarned = (state.stats.moneyEarned || 0) + payout;
+      state.stats.respect = (state.stats.respect || 0) + 1;
     }
-    // Owned: rest — full health + save.
-    p.health = 100;
-    p.armour = Math.max(p.armour, 25);
-    if (ctx.save && ctx.save.save) ctx.save.save();
-    msg('Rested at Casa Verde. Health restored, game saved.', 'good');
+    emit('job:done', { job: activeJob, payout });
+    emit('message', { text: `Job done: ${activeJob.name} (+$${payout})` });
+    activeJob = null;
     return true;
   }
 
-  function isExportTarget(defId) {
-    return (state.side.exportRemaining || []).includes(defId);
+  // --- Export list ----------------------------------------------------------
+  function nextExport() {
+    return EXPORT_LIST.find((e) => !state.collectibles.exportsDone.includes(e.id)) || null;
   }
 
-  function update(dt) {
-    if (state.screen !== 'play') return;
-
-    // --- Golden Geckos: walk within 2.5 m.
-    for (const g of geckos) {
-      if (!g.mesh.visible) continue;
-      g.mesh.rotation.y += dt * 1.5;
-      if (Math.hypot(p.x - g.x, p.z - g.z) < 2.5) {
-        g.mesh.visible = false;
-        state.side.geckoIds.push(g.i);
-        state.side.geckosFound += 1;
-        state.stats.collectibles += 1;
-        p.money += GECKO_REWARD;
-        p.rp += 25;
-        state.stats.moneyEarned += GECKO_REWARD;
-        msg(`Golden Gecko ${state.side.geckosFound}/20! +$${GECKO_REWARD}, +25 RP.`, 'good');
-        if (state.side.geckosFound >= GECKO_COUNT) {
-          p.money += 2000;
-          state.stats.moneyEarned += 2000;
-          msg('All 20 Golden Geckos! Mama Luz pays a $2,000 completion bonus.', 'good');
-        }
-      }
+  function deliverExport(carName, pos) {
+    const want = nextExport();
+    if (!want) {
+      emit('message', { text: 'Export list complete — the buyer is happy.' });
+      return null;
     }
-
-    // --- Stunt jumps: drive over a ramp faster than 12 m/s.
-    const veh = p.vehicleId !== null
-      ? state.vehicles.find((v) => v.id === p.vehicleId) : null;
-    if (veh && Math.abs(veh.speed) > 12) {
-      for (let i = 0; i < JUMPS.length; i += 1) {
-        const j = JUMPS[i];
-        if ((state.side.jumpIds || []).includes(i)) continue;
-        if (Math.hypot(p.x - j.x, p.z - j.z) < 5) {
-          state.side.jumpIds.push(i);
-          state.side.jumpsDone += 1;
-          state.stats.jumps += 1;
-          p.money += JUMP_REWARD;
-          p.rp += 25;
-          state.stats.moneyEarned += JUMP_REWARD;
-          airT = 0.9;
-          airVeh = veh;
-          msg(`Stunt jump! ${j.name} — ${state.side.jumpsDone}/5. +$${JUMP_REWARD}, +25 RP.`, 'good');
-        }
-      }
+    if (carName !== want.car) {
+      emit('message', { text: `The buyer wants a ${want.car}, not a ${carName}.` });
+      return null;
     }
-    // The hop itself: a visible arc on the vehicle mesh.
-    if (airT > 0 && airVeh) {
-      airT -= dt;
-      const k = 1 - airT / 0.9;
-      airVeh._airY = Math.sin(k * Math.PI) * 2.2;
-      if (airT <= 0) { airVeh._airY = 0; airVeh = null; }
+    if (dist(pos, EXPORT_DOCK) > 16) {
+      emit('message', { text: 'Deliver the car to the Marina Alba dock.' });
+      return null;
     }
-
-    // --- Export list: drive a wanted car to the Marina Alba dock.
-    const wanted = veh && isExportTarget(veh.defId);
-    if (exportMarker) exportMarker.visible = !!wanted;
-    if (wanted) {
-      if (!state.mission) {
-        setObjective(`EXPORT: deliver the ${(VEHICLES[veh.defId] || {}).name || veh.defId} to Marina Alba — $${EXPORT_REWARD}.`);
-      }
-      if (Math.hypot(p.x - EXPORT_POINT.x, p.z - EXPORT_POINT.z) < 8) {
-        const defId = veh.defId;
-        state.side.exportRemaining = state.side.exportRemaining.filter((d) => d !== defId);
-        state.side.exportsDone += 1;
-        state.stats.exports += 1;
-        p.money += EXPORT_REWARD;
-        p.rp += 50;
-        state.stats.moneyEarned += EXPORT_REWARD;
-        if (ctx.vehicles && ctx.vehicles.removeVehicle) ctx.vehicles.removeVehicle(veh.id);
-        p.vehicleId = null;
-        p.onFoot = true;
-        p.hidden = 0;
-        p.speed = 0;
-        msg(`Exported the ${(VEHICLES[defId] || {}).name}! +$${EXPORT_REWARD}, +50 RP. ${state.side.exportRemaining.length} left on the list.`, 'good');
-        if (state.side.exportRemaining.length === 0) {
-          p.money += 3000;
-          state.stats.moneyEarned += 3000;
-          msg('Export list complete! The buyer pays a $3,000 bonus.', 'good');
-        }
-        setObjective(state.mission ? state.mission.objective : 'Go to the yellow marker to start the next mission.');
-      }
-    }
-
-    // --- District jobs + safehouse on E (on foot, no car within 4 m so E
-    // never fights the enter-car action).
-    const eHeld = input ? input.held('KeyE') : false;
-    if (eHeld && !prevE && p.onFoot) {
-      if (!nearCar(4)) {
-        if (trySafehouse()) {
-          // handled
-        } else {
-          for (const spot of JOB_SPOTS) {
-            if (Math.hypot(p.x - spot.x, p.z - spot.z) < 5) {
-              startJob(spot);
-              break;
-            }
-          }
-        }
-      }
-    }
-    prevE = eHeld;
-
-    // --- Active job: timer + arrival.
-    if (activeJob) {
-      activeJob.timer -= dt;
-      if (Math.hypot(p.x - activeJob.x, p.z - activeJob.z) < 6) {
-        completeJob();
-      } else if (activeJob.timer <= 0) {
-        msg(`Job in ${activeJob.district} expired — the package went to someone else.`, 'bad');
-        activeJob = null;
-        setObjective(state.mission ? state.mission.objective : 'Go to the yellow marker to start the next mission.');
-      }
-    }
+    state.collectibles.exportsDone.push(want.id);
+    if (state.player) state.player.money = (state.player.money || 0) + want.payout;
+    if (state.stats) state.stats.moneyEarned = (state.stats.moneyEarned || 0) + want.payout;
+    emit('export:done', { id: want.id, car: want.car, payout: want.payout });
+    emit('message', { text: `Export delivered: ${want.car} (+$${want.payout})` });
+    const next = nextExport();
+    if (next) emit('message', { text: `Next export wanted: ${next.car}` });
+    return want;
   }
 
-  buildGeckos();
-  buildJumps();
-  buildMarkers();
+  // --- Casa Verde safehouse ---------------------------------------------------
+  function buySafehouse() {
+    if (state.collectibles.safehouseOwned) return true;
+    const money = (state.player && state.player.money) || 0;
+    if (money < SAFEHOUSE_PRICE) {
+      emit('message', { text: `Casa Verde costs $${SAFEHOUSE_PRICE} — you have $${money}.` });
+      return false;
+    }
+    state.player.money = money - SAFEHOUSE_PRICE;
+    state.collectibles.safehouseOwned = true;
+    emit('safehouse:bought', { price: SAFEHOUSE_PRICE });
+    emit('message', { text: 'Casa Verde is yours — rest here to heal and save.' });
+    return true;
+  }
 
-  // A wanted car entered: tell the player it is on the export list.
-  if (events) {
-    events.on('vehicle-enter', (d) => {
-      const v = d && d.vehicle;
-      if (v && isExportTarget(v.defId)) {
-        msg(`That ${(VEHICLES[v.defId] || {}).name} is on the export list — take it to the Marina Alba dock.`, 'good');
-      }
-    });
+  function restAtSafehouse(pos) {
+    if (!state.collectibles.safehouseOwned) return false;
+    if (dist(pos, SAFEHOUSE_POS) > 14) return false;
+    if (state.player) {
+      state.player.health = 100;
+      state.player.armour = Math.max(state.player.armour || 0, 25);
+    }
+    emit('safehouse:rested', {});
+    emit('message', { text: 'Rested at Casa Verde — health restored. Game saved.' });
+    if (bus && typeof bus.emit === 'function') bus.emit('save:autosave', { slot: 1 });
+    return true;
+  }
+
+  // Tick hook: gecko pickup is proximity based; call from the main loop.
+  function update(pos) {
+    if (!pos) return;
+    collectGecko(pos);
   }
 
   return {
+    GECKOS,
+    STUNT_JUMPS,
+    EXPORT_LIST,
+    EXPORT_DOCK,
+    SAFEHOUSE_POS,
+    SAFEHOUSE_PRICE,
+    collectGecko,
+    nearestGecko,
+    tryStuntJump,
+    jobsFor,
+    takeJob,
+    completeJob,
+    nextExport,
+    deliverExport,
+    buySafehouse,
+    restAtSafehouse,
     update,
-    isExportTarget,
-    get geckos() { return geckos; },
-    get jumps() { return JUMPS; },
-    get jobSpots() { return JOB_SPOTS; },
-    get exportPoint() { return EXPORT_POINT; },
-    get activeJob() { return activeJob; },
-    get safehousePrice() { return SAFEHOUSE_PRICE; },
+    get activeJob() {
+      return activeJob;
+    },
+    get geckosFound() {
+      return state.collectibles.geckosFound.length;
+    },
   };
 }
