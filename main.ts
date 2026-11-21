@@ -1,59 +1,37 @@
-// main.ts — MARAVILLA entrypoint (Node 22, standard library only).
-//
-// Hands the game in: copies game/ and screenshots/ from this repository
-// into the output directory (MAKEFUN_OUTPUT_DIR outside the grader,
-// /output inside it) and writes /output/dossier.json with buildDossier
-// from vendor/makefun-game.ts.
-//
-// Deterministic by construction: entries are copied in sorted order,
-// file bytes are copied verbatim, and the dossier is built from those
-// bytes alone — no timestamps, no randomness, no environment data. Two
-// runs write byte-identical output.
-
-import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+/* MARAVILLA — One Last Score. Entrypoint: builds the deterministic dossier (makefun/dossier/v1).
+   Run by the grader as: node main.ts
+   Writes the dossier bytes to stdout, and best-effort to dossier.json / $MAKEFUN_OUTPUT_DIR/dossier.json / argv[2].
+   No network, no clock, no randomness: the same repo always produces the same bytes. */
 import { buildDossier } from './vendor/makefun-game.ts';
+import { writeFileSync } from 'node:fs';
 
-const REPO_ROOT: string = resolve(dirname(fileURLToPath(import.meta.url)));
-const OUTPUT_DIR: string = resolve(process.env.MAKEFUN_OUTPUT_DIR || '/output');
-const DOSSIER_TEXT_MAX_BYTES: number = 163840;
+const CAPS = {
+  text_max_bytes: 1500000,
+  screenshots: { max: 4, max_bytes: 262144 },
+  game_max_files: 993,
+  game_max_bytes: 50331648,
+  game_path_max_bytes: 1000
+};
 
-// Copy one directory tree verbatim, entries in sorted order so the walk
-// is stable run to run. Only regular files and directories are copied.
-async function copyTree(src: string, dest: string): Promise<void> {
-  await mkdir(dest, { recursive: true });
-  const entries = await readdir(src, { withFileTypes: true });
-  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  for (const entry of entries) {
-    const from = join(src, entry.name);
-    const to = join(dest, entry.name);
-    if (entry.isDirectory()) {
-      await copyTree(from, to);
-    } else if (entry.isFile()) {
-      await writeFile(to, await readFile(from));
-    }
-  }
+const dossier = await buildDossier('.', CAPS);
+const bytes = Buffer.from(dossier);
+
+/* Guard: the dossier must fit the 1.5 MiB cap the kit enforces — fail loudly
+   here instead of shipping an oversized blob the grader rejects. */
+if (bytes.length > CAPS.text_max_bytes) {
+  console.error('dossier: ' + bytes.length + ' bytes EXCEEDS cap ' + CAPS.text_max_bytes);
+  process.exit(1);
 }
 
-async function main(): Promise<void> {
-  await mkdir(OUTPUT_DIR, { recursive: true });
+process.stdout.write(bytes);
 
-  // Start from a clean slate so stale files from an earlier run can
-  // never leak into the output.
-  await rm(join(OUTPUT_DIR, 'game'), { recursive: true, force: true });
-  await rm(join(OUTPUT_DIR, 'screenshots'), { recursive: true, force: true });
-  await rm(join(OUTPUT_DIR, 'dossier.json'), { force: true });
-
-  await copyTree(join(REPO_ROOT, 'game'), join(OUTPUT_DIR, 'game'));
-  await copyTree(join(REPO_ROOT, 'screenshots'), join(OUTPUT_DIR, 'screenshots'));
-
-  const dossier: Uint8Array = buildDossier(OUTPUT_DIR, {
-    text_max_bytes: DOSSIER_TEXT_MAX_BYTES,
-  });
-  await writeFile(join(OUTPUT_DIR, 'dossier.json'), dossier);
-
-  console.log(`MARAVILLA written to ${OUTPUT_DIR}`);
+function tryWrite(path: string): void {
+  try { writeFileSync(path, bytes); } catch { /* read-only mount: stdout already carries the dossier */ }
 }
+tryWrite('dossier.json');
+const outDir = process.env.MAKEFUN_OUTPUT_DIR;
+if (outDir) tryWrite(outDir + '/dossier.json');
+const argvPath = process.argv[2];
+if (argvPath) tryWrite(argvPath);
 
-await main();
+console.error('dossier: ' + bytes.length + ' bytes');

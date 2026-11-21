@@ -1,123 +1,42 @@
+[![make.fun · gta6-01](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+[![make.fun · gta6-01 rank](https://make.fun/badge/gta6-01/rank.svg)](https://make.fun/bounty/gta6-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+[![make.fun · gta6-01 reward](https://make.fun/badge/gta6-01/reward.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+
 # MARAVILLA — One Last Score
 
-[![make.fun · gta6-01](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
-[![rank](https://make.fun/badge/gta6-01/tuyullsxx1-cmd/gta6-01/rank.svg)](https://make.fun/bounty/gta6-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
-[![reward](https://make.fun/badge/gta6-01/tuyullsxx1-cmd/gta6-01/reward.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+A 3D open-world crime game set in the fictional coastal city of **Maravilla**. You are **Milo Vane**, a driver fresh off the boat with nothing but fast hands and a faster car. Ten story missions across three acts — from a first meet at Downtown Plaza to the vault of the Grand Maravilla casino — with a crew that has your back: **Juno Park** (driver), **Theo Ashford** (mechanic), **Iris Calloway** (lookout), and **Bram Okafor** (muscle).
 
-An open-world crime game in the spirit of GTA 6, built for the make.fun
-gta6-01 bounty. It runs entirely offline in a desktop browser: one static
-`game/` folder, no build step, no network requests, all art drawn with
-three.js geometry and canvas 2D, all music synthesised live with WebAudio.
+## What is in the game
 
-## Story
+- **Real driving** — stealable cars with arcade physics, a live km/h speedometer, low chase camera with speed FOV kick, and a street race you win by actually driving.
+- **A living city** — six districts (Downtown, Velvet Bay, Palma Hills, Old Town, Ironworks, Boardwalk), 20+ traffic cars, 70 pedestrians, day/night clock with a DAY counter.
+- **Luxury dusk look** — blue-hour sky, golden-hour sun, marina with yachts, glass casino tower with a neon crown, fountain plaza, palm boulevard, wet asphalt with neon reflections, clearcoat car paint, gold-trimmed HUD.
+- **Systems** — wanted levels 1–5 (foot cops, patrol cars, roadblocks, helicopter), dispatch panel with unique callsigns and a crime ticker, six weapon slots with a wheel and persistent slot bar, district standing with real consequences, 20 collectibles, 5 stunt jumps, an export list, safehouses with quick-save, garage upgrades, a motorbike, 3 save slots, and a tabbed pause menu (MAP / STORY / STATS / CREW) with career stats.
+- **Story** — 10 missions in 3 acts with stages, dialogue, payouts, and Gold / Silver / Bronze ratings, ending in the vault job at the Grand Maravilla.
+- **Sound** — WebAudio engine hum, three synth radio stations, and full SFX. Everything is procedural and offline; the game loads nothing over the network.
 
-Rico “Rook” Vega comes home to Maravilla after a five-year stretch, to pull
-one last score with his crew: Mama Luz the fixer, Celia Reyes the driver and
-hacker, Tito Fuentes the mechanic, and Big Marlon the muscle. Detective El
-Gato and Maravilla PD are closing in. Maravilla is a fictional sun-drenched
-coastal city — palm avenues, a lighthouse, a stadium, a pier, six districts
-that each remember how you treated them.
+## How to play
 
-## Features
-
-- A 600×600 m open city to explore on foot and by car: Marina Alba, El Faro,
-  Centro Alba, Paseo del Mar, Miramar and Estadio Sol, with landmarks,
-  night-market stalls, stilt houses, boats and surfboards.
-- 64 pedestrians — clustered at the night market, the beach and the pier — and
-  20 traffic cars with simple AI, traffic lights and horns.
-- 7 drivable vehicles — five cars, a van, the Picuda 250 motorbike and the
-  Tormenta S sports car — with carjacking, arcade physics, nitro, handbrake
-  and damage that can end in a burning, chain-reacting explosion.
-- A 5-star wanted system: foot cops, patrol cars, ramming units, roadblocks
-  from 3 stars and a helicopter from 4, with a live dispatch panel naming
-  every unit by callsign, role and distance.
-- 10 named story missions in 3 acts with dialogue and G/S/B ratings, each
-  paying out in dollars shown in the mission header and on completion, plus
-  3 timed street races and taxi fares.
-- A weapon wheel with 6 weapons (fists, pistol, SMG, shotgun, rifle and the
-  Trueno RPG), ray-cast shooting and pickups.
-- District standing on a LOYAL–HOSTILE scale that changes heat, prices, cop
-  speed and job pay — the same crime earns wanted 3 in a loyal district and
-  wanted 5 in a hostile one.
-- Celia’s Garage (engine, armour and nitro upgrades), the phone and its four
-  crew abilities, three procedural radio stations, 20 Golden Geckos, 5 stunt
-  jumps, district jobs, a 5-car export list and the Casa Verde safehouse.
-- Respect, ranks from ROOKIE to LEYENDA, a detailed career stats page (cars
-  stolen, cops escaped, longest jump, completion %), 3 save slots
-  and a local top-5 leaderboard, all behind a 5-tab pause menu.
-- A HUD with minimap and route line, health and armour bars, money, speed,
-  wanted stars, radio, a DAY clock, district standing, dispatch, crew cards
-  and a NEXT JOB header with stage pips.
-
-## Controls
+Open `game/index.html` in a browser (or serve the `game/` folder). Click **START**.
 
 | Key | Action |
 | --- | --- |
-| W A S D | Walk / drive |
-| Mouse drag / wheel | Look around / zoom |
-| Enter | Start |
-| E | Enter or exit a car · carjack · do the mission action |
-| Shift | Run on foot · nitro in a car (when upgraded) |
-| Space | Jump on foot · handbrake in a car |
-| H | Horn |
-| Tab | Weapon wheel |
-| 1–6 / Q | Select weapon / cycle weapons |
-| Click | Shoot |
-| R | Reload |
-| F | Phone |
-| Z / X / V / B | Call Celia / Tito / Big Marlon / Mama Luz |
-| G | Garage (at Celia’s Garage, on foot) |
-| C / M | Change radio station / mute |
-| P / Esc | Pause |
+| WASD / Arrows | Drive & walk |
+| E | Enter / exit car |
+| Mouse click | Shoot |
+| Q | Weapon wheel |
+| 1–6 | Select weapon |
+| Shift | Nitro / sprint |
+| R | Cycle radio station |
+| P | Phone |
+| M | Missions |
+| T | Quick save |
+| Esc | Pause (MAP / STORY / STATS / CREW) |
 
-## Run it
+## Tech
 
-```sh
-node serve.ts
-# open http://localhost:8080/game/index.html
-```
+Three.js (vendored, offline) + plain JavaScript. No build step, no network at runtime. `main.ts` builds the deterministic `makefun/dossier/v1` dossier from `game/` and `screenshots/` — run `node main.ts` to reproduce it byte-for-byte.
 
-Or serve `game/` with any static file server. The game needs no build step
-and makes zero network requests.
+## License
 
-To hand the entry in (what the grader runs):
-
-```sh
-mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
-```
-
-`main.ts` copies `game/` and `screenshots/` into the output directory and
-writes `dossier.json` there. Two runs produce byte-identical output.
-
-## Structure
-
-- `main.ts` — Node 22 entrypoint: copies the game and screenshots, writes the dossier.
-- `serve.ts` — small static file server for local play.
-- `shots.json` — the four staged screenshots and their fixed seeds.
-- `vendor/makefun-game.ts` — the kit’s dossier library, unchanged.
-- `game/index.html` — the UI shell: canvas, HUD, title, pause and end screens.
-- `game/vendor/three.module.min.js` — three.js r160, vendored.
-- `game/src/` — 25 modules, one job each:
-  `main` boot and loop · `state` game state · `config` fixed data ·
-  `render` three.js renderer and camera · `city` districts and landmarks ·
-  `vehicles` car factory, damage and explosions · `traffic` cars and
-  pedestrians · `driving` arcade physics and carjacking · `player`
-  on-foot movement and health · `police` wanted levels and pursuit ·
-  `weapons` wheel, shooting and pickups · `missions` story, races, taxi ·
-  `phone` crew calls · `districts` standing · `garage` upgrades ·
-  `audio` procedural radio and effects · `save` slots and leaderboard ·
-  `side` geckos, jumps, jobs, exports, safehouse · `pause` tabbed menu ·
-  `portraits` canvas-drawn crew faces · `hud` minimap and panels ·
-  `shots` staged screenshots · `input` keyboard and mouse ·
-  `events` event bus · `random` seeded RNG.
-
-## Screenshots
-
-Four staged shots, each 1280×800, taken from the game itself
-(`shots.json` holds the query strings and fixed seeds):
-
-1. `1-start.jpg` — the title screen over Maravilla at golden hour.
-2. `2-drive.jpg` — driving down Paseo del Mar, car big and centre-frame.
-3. `3-chase.jpg` — a three-star chase: patrol cars, a roadblock, dispatch live.
-4. `4-mission.jpg` — mission 1, FIRST KEYS, at the garage with the crew briefing.
-
+MIT — see `LICENSE`.
