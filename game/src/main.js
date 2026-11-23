@@ -21,6 +21,7 @@ import { createAudio } from './audio.js';
 import { saveSlot, loadSlot, hasSlot } from './save.js';
 import { createSide, updateSide, tryExport, districtJob, buySafehouse, restAtSafehouse } from './side.js';
 import { createPause } from './pause.js';
+import { addClouds, addWaterGlitter, addCasinoDepth, addPlazaForeground, addMarinaForeground, dressCar, dressPerson, updateRealism } from './realism.js';
 import { portraitURL } from './portraits.js';
 import { applyShot } from './shots.js';
 import { CREW, VEHICLES } from './config.js';
@@ -49,6 +50,14 @@ const sky = createSky(scene);
 const env = createEnvironment(scene, renderer);
 const city = buildCity(scene, SEED);
 scene.add(city.group);
+// Realism pass: sky, water, casino depth and staged foreground props.
+const realism = { clouds: addClouds(scene), casino: addCasinoDepth(scene) };
+const marinaFx = addMarinaForeground(scene);
+realism.yachts = marinaFx.yachts;
+const plazaFx = addPlazaForeground(scene);
+realism.flashers = plazaFx.flashers;
+realism.water = addWaterGlitter(scene, city.water);
+let fxTime = 0;
 const traffic = createTraffic(scene, SEED, city.roadPoints);
 const police = createPolice(scene);
 const pickups = createPickups(scene, SEED);
@@ -63,6 +72,7 @@ scene.add(heroLight);
 
 // Player mesh (Milo) and crew meshes standing in the world.
 const playerMesh = createPlayerMesh();
+dressPerson(playerMesh);
 scene.add(playerMesh);
 const crewMeshes = {};
 for (const m of CREW) {
@@ -77,6 +87,7 @@ crewMeshes.theo.position.set(-96, 0, 126);
 crewMeshes.iris.position.set(-36, 0, -96);
 crewMeshes.bram.position.set(204, 0, 156);
 for (const m of Object.values(crewMeshes)) m.rotation.y = Math.PI;
+dressPerson(crewMeshes.vera, { jacket: 0x7a1f3d });
 
 // Parked cars along the roads, including Milo's gold Solano GT at the plaza.
 const parked = [];
@@ -349,6 +360,7 @@ function step(dt) {
       if (playerCarMesh) scene.remove(playerCarMesh);
       playerCarMesh = buildCarMesh(vehicleDef(state.car.defId), { seed: SEED + 31 });
       playerCarMesh.userData.beam.intensity = 0;
+      dressCar(playerCarMesh);
       scene.add(playerCarMesh);
       playerCarDef = state.car.defId;
     }
@@ -388,6 +400,8 @@ function step(dt) {
   city.water.position.y = 0.1 + Math.sin(state.dayTime * 40) * 0.05;
   for (const y of city.yachts) y.position.y = 0.2 + Math.sin(state.dayTime * 30 + y.position.x) * 0.15;
   city.beam.parent.rotation.y += dt * 0.4;
+  fxTime += dt;
+  updateRealism(realism, dt, fxTime);
 
   state.district = districtAt(state.player.x, state.player.z).id;
   hud.update(state, { marker: markerTarget() }, dt);
@@ -426,7 +440,7 @@ window.addEventListener('resize', () => {
 
 // --- Shot staging / self-test entry points ---
 if (SHOT) {
-  applyShot(SHOT, { state, bus, placeVera: (x, z) => crewMeshes.vera.position.set(x, 0, z) });
+  applyShot(SHOT, { state, bus, scene, placeVera: (x, z) => crewMeshes.vera.position.set(x, 0, z) });
   state.started = true;
 }
 if (SELFTEST) {

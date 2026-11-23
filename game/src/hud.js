@@ -193,8 +193,8 @@ export function createHud(state, deps) {
     if (obj) {
       const pips = Array.from({ length: obj.total }, (_, i) => `<span class="pip${i < obj.stage ? ' done' : i === obj.stage ? ' cur' : ''}">●</span>`).join('');
       mh.innerHTML = obj.started
-        ? `MISSION ${obj.missionNumber} · ${obj.title} — STAGE ${obj.stage + 1}/${obj.total}: ${obj.stageName} ${pips}<br><span class="next">NEXT: ${escapeHtml(obj.next)}</span>`
-        : `NEXT JOB: ${obj.title} ${pips}<br><span class="next">NEXT: ${escapeHtml(obj.next)}</span>`;
+        ? `MISSION ${obj.missionNumber} · ${obj.title} — STAGE ${obj.stage + 1}/${obj.total}: ${obj.stageName} ${pips}<br><span class="next">NEXT: ${escapeHtml(obj.next)}</span><br><span class="tagline">MARAVILLA · 10 story missions · 5 vehicles · 5-star wanted · open coastal city</span>`
+        : `NEXT JOB: ${obj.title} ${pips}<br><span class="next">NEXT: ${escapeHtml(obj.next)}</span><br><span class="tagline">MARAVILLA · 10 story missions · 5 vehicles · 5-star wanted · open coastal city</span>`;
     } else {
       mh.innerHTML = 'ALL MISSIONS COMPLETE — Maravilla is yours.';
     }

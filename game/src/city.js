@@ -241,14 +241,23 @@ export function buildCity(scene, seed) {
     addLamp(cx - 26, cz - 26); addLamp(cx + 26, cz + 26);
   }
 
-  // Downtown Plaza: patterned floor, fountain, benches, café tables.
+  // Downtown Plaza: warm terracotta checker with a thin gold ring inlay.
+  // No big flat disc — the fountain itself is the water in the middle.
   const plazaTex = canvasTexture(512, 512, (g, w, h) => {
     for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
-      g.fillStyle = (x + y) % 2 ? '#c8b898' : '#a89878'; g.fillRect(x * 64, y * 64, 64, 64);
-      g.strokeStyle = 'rgba(120,90,40,0.5)'; g.strokeRect(x * 64 + 2, y * 64 + 2, 60, 60);
+      g.fillStyle = (x + y) % 2 ? '#c89a6a' : '#b08050'; g.fillRect(x * 64, y * 64, 64, 64);
+      g.strokeStyle = 'rgba(90,50,20,0.5)'; g.strokeRect(x * 64 + 2, y * 64 + 2, 60, 60);
     }
-    g.fillStyle = '#8a6a3a'; g.beginPath(); g.arc(256, 256, 90, 0, Math.PI * 2); g.fill();
-    g.fillStyle = '#5a9ac8'; g.beginPath(); g.arc(256, 256, 70, 0, Math.PI * 2); g.fill();
+    g.strokeStyle = '#d4af37'; g.lineWidth = 6;
+    g.beginPath(); g.arc(256, 256, 96, 0, Math.PI * 2); g.stroke();
+    g.strokeStyle = 'rgba(212,175,55,0.5)'; g.lineWidth = 2;
+    for (let i = 0; i < 16; i++) {
+      const a = (i / 16) * Math.PI * 2;
+      g.beginPath();
+      g.moveTo(256 + Math.cos(a) * 100, 256 + Math.sin(a) * 100);
+      g.lineTo(256 + Math.cos(a) * 150, 256 + Math.sin(a) * 150);
+      g.stroke();
+    }
   });
   const plaza = new THREE.Mesh(new THREE.PlaneGeometry(110, 110),
     new THREE.MeshStandardMaterial({ map: plazaTex, roughness: 0.55, metalness: 0.15 }));
